@@ -1,0 +1,145 @@
+/* frontend/src/index.css */
+/* Global styles and design system for VN AI Trader.
+   Dark theme with glassmorphism: teal + amber on dark slate. */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Google Fonts import fallback ────────────────────────────────────────── */
+@layer base {
+  :root {
+    --color-bg-primary:   #060c19;
+    --color-bg-secondary: #0b1120;
+    --color-bg-card:      rgba(15, 22, 41, 0.8);
+    --color-border:       rgba(45, 212, 191, 0.12);
+    --color-teal:         #14b8a6;
+    --color-teal-bright:  #2dd4bf;
+    --color-amber:        #f59e0b;
+    --color-amber-bright: #fbbf24;
+    --color-green:        #22c55e;
+    --color-red:          #ef4444;
+    --color-text-primary: #f1f5f9;
+    --color-text-muted:   #64748b;
+  }
+
+  html {
+    font-family: 'Inter', system-ui, sans-serif;
+    background-color: var(--color-bg-primary);
+    color: var(--color-text-primary);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: 
+      radial-gradient(ellipse at 20% 50%, rgba(20, 184, 166, 0.06) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 20%, rgba(245, 158, 11, 0.04) 0%, transparent 50%),
+      var(--color-bg-primary);
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--color-bg-secondary); }
+  ::-webkit-scrollbar-thumb { background: rgba(45, 212, 191, 0.2); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(45, 212, 191, 0.4); }
+}
+
+/* ── Component utilities ─────────────────────────────────────────────────── */
+@layer components {
+  /* Glassmorphism card */
+  .glass-card {
+    background: rgba(15, 22, 41, 0.75);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(45, 212, 191, 0.1);
+    border-radius: 12px;
+  }
+
+  .glass-card-hover {
+    @apply glass-card transition-all duration-200;
+  }
+  .glass-card-hover:hover {
+    border-color: rgba(45, 212, 191, 0.25);
+    box-shadow: 0 0 20px rgba(20, 184, 166, 0.08);
+  }
+
+  /* Teal glow button */
+  .btn-primary {
+    @apply px-4 py-2 rounded-lg font-medium text-sm transition-all duration-200;
+    background: linear-gradient(135deg, #0d9488, #14b8a6);
+    color: white;
+  }
+  .btn-primary:hover {
+    box-shadow: 0 0 16px rgba(20, 184, 166, 0.4);
+    transform: translateY(-1px);
+  }
+
+  /* Kill switch button */
+  .btn-kill {
+    @apply px-6 py-3 rounded-xl font-bold text-white transition-all duration-200;
+    background: linear-gradient(135deg, #dc2626, #ef4444);
+    box-shadow: 0 0 20px rgba(239, 68, 68, 0.3);
+  }
+  .btn-kill:hover {
+    box-shadow: 0 0 32px rgba(239, 68, 68, 0.5);
+    transform: translateY(-1px);
+  }
+  .btn-kill:active {
+    transform: translateY(0);
+  }
+
+  /* Positive / negative PnL values */
+  .pnl-positive { color: #22c55e; }
+  .pnl-negative { color: #ef4444; }
+
+  /* Confluence badge */
+  .badge-high   { @apply px-2 py-0.5 rounded-full text-xs font-medium bg-teal-500/20  text-teal-300; }
+  .badge-mid    { @apply px-2 py-0.5 rounded-full text-xs font-medium bg-amber-500/20 text-amber-300; }
+  .badge-low    { @apply px-2 py-0.5 rounded-full text-xs font-medium bg-slate-700 text-slate-400; }
+
+  /* Animated dot for live status */
+  .live-dot {
+    @apply inline-block w-2 h-2 rounded-full bg-teal-400;
+    animation: livePulse 2s ease-in-out infinite;
+  }
+
+  /* Sidebar nav item */
+  .nav-item {
+    @apply flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium transition-all duration-150 cursor-pointer;
+    color: var(--color-text-muted);
+  }
+  .nav-item:hover { color: var(--color-teal-bright); background: rgba(45, 212, 191, 0.06); }
+  .nav-item.active {
+    color: var(--color-teal-bright);
+    background: rgba(45, 212, 191, 0.1);
+    border-left: 2px solid var(--color-teal-bright);
+  }
+
+  /* Table row hover */
+  .table-row-hover {
+    @apply transition-colors duration-100 cursor-pointer;
+  }
+  .table-row-hover:hover { background: rgba(45, 212, 191, 0.04); }
+
+  /* Monospace data display */
+  .mono { font-family: 'JetBrains Mono', monospace; }
+}
+
+/* ── Keyframes ───────────────────────────────────────────────────────────── */
+@keyframes livePulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.5; transform: scale(0.85); }
+}
+
+/* ── Recharts overrides ──────────────────────────────────────────────────── */
+.recharts-tooltip-wrapper .recharts-default-tooltip {
+  background: rgba(15, 22, 41, 0.95) !important;
+  border: 1px solid rgba(45, 212, 191, 0.2) !important;
+  border-radius: 8px !important;
+}

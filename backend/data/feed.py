@@ -17,9 +17,9 @@ class MarketRegime(Enum):
     SIDEWAYS = "sideways"
     VOLATILE = "volatile"
 
-# Baseline pseudo-prices for mock symbols
+# Baseline pseudo-prices for mock symbols - Updated to match March 2026 levels
 _BASE_PRICES = {
-    "VN30F1M": 1250.5,
+    "VN30F1M": 1760.0,
     "HPG": 27.50,
     "SSI": 35.20
 }
@@ -44,6 +44,20 @@ class AsyncMockFeed:
         self._task = asyncio.create_task(self._loop())
         logger.info(f"Mock Feed started with {self.interval}s interval.")
 
+    async def sync_with_market(self, dnse_service):
+        """Fetches latest real prices for all baseline symbols to align the mock feed."""
+        logger.info("Mock Feed: Synchronizing initial prices with actual market data...")
+        for symbol in self.prices.keys():
+            try:
+                # Fetch more bars to account for lunch breaks or gaps
+                bars = await dnse_service.fetch_history(symbol, timeframe="1m", limit=10)
+                if bars:
+                    latest_price = bars[-1].close
+                    self.prices[symbol] = latest_price
+                    logger.success(f"Mock Feed synced {symbol} -> {latest_price}")
+            except Exception as e:
+                logger.warning(f"Failed to sync {symbol} with market: {e}. Using baseline.")
+
     def stop(self):
         """Stops the mock feed task."""
         self.is_running = False
@@ -55,8 +69,8 @@ class AsyncMockFeed:
         while self.is_running:
             try:
                 for symbol in self.prices.keys():
-                    # Base volatility (0.05% per tick)
-                    vol_factor = 0.0005
+                    # Reduced volatility
+                    vol_factor = 0.0001
                     
                     if self.regime == MarketRegime.TRENDING_UP:
                         drift = 0.0002 # 0.02% drift up

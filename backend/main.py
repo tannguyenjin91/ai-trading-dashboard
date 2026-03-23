@@ -166,7 +166,7 @@ async def run_ai_insight_loop(app: FastAPI):
                 await asyncio.sleep(60) # retry sooner if no data
                 continue
                 
-            df = aggregate_to_ohlcv(ticks, timeframe="1m")
+            df = aggregate_to_ohlcv(ticks, timeframe="1min")
             if len(df) < 20: 
                 await asyncio.sleep(60) # retry sooner if not enough data
                 continue
@@ -233,7 +233,7 @@ async def run_recommendation_loop(app: FastAPI):
                 await asyncio.sleep(60)
                 continue
                 
-            df = aggregate_to_ohlcv(ticks, timeframe="1m")
+            df = aggregate_to_ohlcv(ticks, timeframe="1min")
             if len(df) < 50:
                 await asyncio.sleep(60)
                 continue
@@ -391,6 +391,7 @@ async def lifespan(app: FastAPI):
 
     # 4. Data Feed & Background Tasks
     app.state.feed = AsyncMockFeed(app, manager, interval_sec=0.5)
+    await app.state.feed.sync_with_market(app.state.dnse_service) # Align with real market
     app.state.feed.start()
     
     # 5. Background Strategy Loops

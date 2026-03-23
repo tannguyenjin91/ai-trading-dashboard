@@ -2,6 +2,7 @@
 # Pydantic v2 settings loaded from .env file.
 # All application configuration is centralized here.
 
+import os
 from enum import Enum
 from pydantic import Field, field_validator, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -26,7 +27,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",

@@ -1,16 +1,119 @@
 // frontend/src/pages/Dashboard.tsx
-import { useState, useEffect } from 'react'
-import { Activity, AlertCircle, Briefcase, Zap, Target } from 'lucide-react'
+import { useState, useEffect, useRef } from 'react'
+import { Activity, AlertCircle, Briefcase, Zap, Target, WifiOff, RefreshCw, Clock, TrendingUp, TrendingDown, Lock } from 'lucide-react'
 import { useWebSocket } from '../hooks/useWebSocket'
-import { useMarketData } from '../hooks/useMarketData'
+import { useMarketStore, type ConnectionStatus as FeedConnectionStatus } from '../hooks/useMarketStore'
 import KillSwitch from '../components/KillSwitch'
 import AgentLog from '../components/AgentLog'
 import RecommendationCard from '../components/RecommendationCard'
 import MarketInsightCard from '../components/MarketInsightCard'
 
+// ── Price Flash Component ─────────────────────────────────────────────────────
+function PriceDisplay({ price, prevPrice, isClosed }: { price: number, prevPrice: number, isClosed: boolean }) {
+  const [flash, setFlash] = useState<'up' | 'down' | null>(null)
+  const prevRef = useRef(prevPrice)
+
+  useEffect(() => {
+    if (isClosed || price === 0 || prevRef.current === 0) {
+      prevRef.current = price
+      return
+    }
+    if (price > prevRef.current) {
+      setFlash('up')
+    } else if (price < prevRef.current) {
+      setFlash('down')
+    }
+    prevRef.current = price
+    const timer = setTimeout(() => setFlash(null), 600)
+    return () => clearTimeout(timer)
+  }, [price])
+
+  const flashClass = flash === 'up' ? 'price-flash-up' : flash === 'down' ? 'price-flash-down' : ''
+
+  return (
+    <span className={`text-2xl font-mono tracking-tight text-white transition-colors duration-300 ${flashClass}`}>
+      {price > 0 ? price.toLocaleString('en-US', { minimumFractionDigits: 1 }) : '---'}
+    </span>
+  )
+}
+
+function FeedStatusBadge({ status, source, isStale, marketSession }: { status: FeedConnectionStatus, source: string, isStale: boolean, marketSession: string }) {
+  if (marketSession === 'CLOSED') {
+    return (
+      <div className="flex items-center gap-1.5 opacity-80">
+        <Lock size={12} className="text-slate-500" />
+        <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">Market Closed</span>
+      </div>
+    )
+  }
+
+  if (isStale) {
+    return (
+      <div className="flex items-center gap-1.5">
+        <Clock size={12} className="text-amber-400" />
+        <span className="text-amber-400 text-xs font-bold uppercase tracking-wider">Stale</span>
+      </div>
+    )
+  }
+
+  if (source === 'dnse_websocket') {
+    return (
+      <div className="flex items-center gap-1.5">
+        <span className="live-dot" />
+        <span className="text-teal-400 text-xs font-bold uppercase tracking-wider">Live</span>
+        <span className="text-[9px] text-slate-500 ml-1">WS</span>
+      </div>
+    )
+  }
+
+  if (source === 'dnse_rest') {
+    return (
+      <div className="flex items-center gap-1.5">
+        <span className="inline-block w-2 h-2 rounded-full bg-blue-400" style={{ animation: 'livePulse 2s ease-in-out infinite' }} />
+        <span className="text-blue-400 text-xs font-bold uppercase tracking-wider">Live</span>
+        <span className="text-[9px] text-slate-500 ml-1">REST</span>
+      </div>
+    )
+  }
+
+  if (source === 'mock') {
+    return (
+      <div className="flex items-center gap-1.5">
+        <span className="inline-block w-2 h-2 rounded-full bg-amber-400" style={{ animation: 'livePulse 2s ease-in-out infinite' }} />
+        <span className="text-amber-400 text-xs font-bold uppercase tracking-wider">Live</span>
+        <span className="text-[9px] text-slate-500 ml-1">MOCK</span>
+      </div>
+    )
+  }
+
+  if (status === 'reconnecting' || status === 'connecting') {
+    return (
+      <div className="flex items-center gap-1.5">
+        <RefreshCw size={12} className="text-amber-400 animate-spin" />
+        <span className="text-amber-400 text-xs font-bold uppercase tracking-wider">Reconnecting</span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <WifiOff size={12} className="text-red-400" />
+      <span className="text-red-400 text-xs font-bold uppercase tracking-wider">Offline</span>
+    </div>
+  )
+}
+
+// ── Main Dashboard ────────────────────────────────────────────────────────────
 export default function Dashboard() {
-  const { isConnected, latestStatus, latestTick, latestSignal, latestInsight, latestRecommendation, messages } = useWebSocket('ws://localhost:8000/ws')
-  const { data: marketData, isLoading, isStale } = useMarketData('VN30F1M')
+  const { isConnected, latestStatus, latestTick, latestInsight, latestRecommendation, messages } = useWebSocket('ws://localhost:8000/ws')
+  
+  // Zustand market store — realtime data from WebSocket
+  const tick = useMarketStore((s) => s.ticks['VN30F1M'])
+  const connectionStatus = useMarketStore((s) => s.connectionStatus)
+  const feedSource = useMarketStore((s) => s.feedSource)
+  const isStale = useMarketStore((s) => s.isStale)
+  const marketSession = useMarketStore((s) => s.marketSession)
+  const lastTickAt = useMarketStore((s) => s.lastTickAt)
   
   const [positions, setPositions] = useState<any[]>([])
   const [logs, setLogs] = useState<any[]>([])
@@ -41,23 +144,33 @@ export default function Dashboard() {
     }
   }, [messages])
 
-  // Aggregate derived stats based on real data
-  const baseBalance = 50000.00 // Assuming base capital, will tie to API later
+  // Derived data from Zustand store
+  const price = tick?.price ?? 0
+  const prevPrice = tick?.prevPrice ?? price
+  const changePct = tick?.changePct ?? 0
+  const high = tick?.high ?? 0
+  const low = tick?.low ?? 0
+  const volume = tick?.sessionVolume ?? tick?.volume ?? 0
+
+  const baseBalance = 50000.00
   const openPnL = positions.reduce((acc, p) => {
-    const currentPrice = marketData?.price || latestTick?.price || p.filled_price
+    const currentPrice = price || latestTick?.price || p.filled_price
     const diff = p.direction === 'BUY' ? currentPrice - p.filled_price : p.filled_price - currentPrice
-    return acc + (diff * 1000) // multiplier representation
+    return acc + (diff * 1000)
   }, 0)
   
   const equity = baseBalance + openPnL
-  const marginUsed = positions.length * 250 // mock margin block
+  const marginUsed = positions.length * 250
   const freeMargin = equity - marginUsed
   const marginLevel = marginUsed > 0 ? (equity / marginUsed) * 100 : 0
 
-  const formatTime = (ts?: number) => ts ? new Date(ts * 1000).toLocaleTimeString('vi-VN') : '--:--:--'
-  const isHealthy = isConnected && !isStale
+  const formatLastUpdate = (ts?: string | null) => {
+    if (!ts) return '--:--:--'
+    try {
+      return new Date(ts).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    } catch { return '--:--:--' }
+  }
 
-  // Helper for PnL styling
   const pnlColorClass = openPnL > 0 ? 'text-teal-400' : openPnL < 0 ? 'text-red-400' : 'text-slate-300'
 
   return (
@@ -68,27 +181,44 @@ export default function Dashboard() {
         
         {/* System & Market Status */}
         <div className="flex flex-wrap items-center gap-6">
-          <div className="flex items-center gap-2">
-            <span className={`w-2 h-2 rounded-full ${isHealthy ? 'bg-teal-500 animate-pulse' : 'bg-red-500'}`}></span>
-            <span className={`text-sm font-bold tracking-wide uppercase ${isHealthy ? 'text-teal-400' : 'text-red-400'}`}>
-              {isHealthy ? 'System Live' : 'System Degraded'}
-            </span>
-          </div>
+          {/* Feed Status */}
+          <FeedStatusBadge status={connectionStatus} source={feedSource} isStale={isStale} marketSession={marketSession} />
+          
           <div className="h-4 w-px bg-white/10 hidden lg:block"></div>
           
           {/* Core Symbol Quote */}
           <div className="flex items-baseline gap-3">
             <span className="text-xl font-bold text-slate-100">VN30F1M</span>
-            {isLoading ? (
-              <span className="text-sm text-slate-500">Loading market...</span>
-            ) : (
+            <PriceDisplay price={price} prevPrice={prevPrice} isClosed={marketSession === 'CLOSED'} />
+            {changePct !== 0 && (
+              <span className={`text-sm font-bold font-mono flex items-center gap-0.5 ${changePct >= 0 ? 'text-teal-400' : 'text-red-400'}`}>
+                {changePct >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
+                {changePct > 0 ? '+' : ''}{changePct.toFixed(2)}%
+              </span>
+            )}
+          </div>
+
+          <div className="h-4 w-px bg-white/10 hidden lg:block"></div>
+
+          {/* Session High / Low / Volume */}
+          <div className="flex items-center gap-4 text-xs text-slate-400">
+            {high > 0 && (
               <>
-                <span className="text-2xl font-mono tracking-tight text-white">{marketData?.price ? marketData.price.toLocaleString('en-US', {minimumFractionDigits: 1}) : '---'}</span>
-                <span className={`text-sm font-bold font-mono ${marketData?.change_pct && marketData.change_pct >= 0 ? 'text-teal-400' : 'text-red-400'}`}>
-                  {marketData?.change_pct ? (marketData.change_pct > 0 ? '+' : '') + marketData.change_pct.toFixed(2) + '%' : ''}
-                </span>
-                <span className="text-xs text-slate-500 ml-2">Vol: {marketData?.volume ? (marketData.volume / 1000).toFixed(1) + 'K' : '---'}</span>
+                <div>
+                  <span className="text-[10px] text-slate-500 uppercase tracking-widest mr-1">H</span>
+                  <span className="text-slate-200 font-mono">{high.toLocaleString('en-US', { minimumFractionDigits: 1 })}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-500 uppercase tracking-widest mr-1">L</span>
+                  <span className="text-slate-200 font-mono">{low.toLocaleString('en-US', { minimumFractionDigits: 1 })}</span>
+                </div>
               </>
+            )}
+            {volume > 0 && (
+              <div>
+                <span className="text-[10px] text-slate-500 uppercase tracking-widest mr-1">Vol</span>
+                <span className="text-slate-200 font-mono">{(volume / 1000).toFixed(1)}K</span>
+              </div>
             )}
           </div>
         </div>
@@ -96,13 +226,31 @@ export default function Dashboard() {
         {/* Info & Mode */}
         <div className="flex items-center gap-4 text-xs font-medium">
           <div className="text-slate-400 flex items-center gap-1.5">
-            <Activity size={12} /> Sync: <span className="text-slate-200">{formatTime(marketData?.last_updated)}</span>
+            <Clock size={12} />
+            <span className="text-slate-200">{formatLastUpdate(lastTickAt)}</span>
           </div>
           <div className={`px-3 py-1 rounded border ${latestStatus?.is_live_trading_enabled ? 'bg-amber-500/10 border-amber-500/30 text-amber-500' : 'bg-slate-800/50 border-slate-700 text-slate-400'}`}>
             {latestStatus?.is_live_trading_enabled ? 'LIVE TRADING' : 'PAPER TRADING'}
           </div>
         </div>
       </div>
+
+      {/* Stale / Disconnected / Closed Warning Banner */}
+      {marketSession === 'CLOSED' ? (
+        <div className="flex items-start gap-2 text-xs text-slate-400 bg-slate-800/50 border border-slate-700/50 p-3 rounded-lg animate-fade-in">
+          <Lock size={14} className="mt-0.5 shrink-0" />
+          <p>The market is currently closed. Auto-trading and AI evaluation evaluate based on the last closing price.</p>
+        </div>
+      ) : (isStale || connectionStatus === 'disconnected') && price > 0 && (
+        <div className="flex items-start gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 p-3 rounded-lg animate-fade-in">
+          <AlertCircle size={14} className="mt-0.5 shrink-0" />
+          <p>
+            {connectionStatus === 'disconnected'
+              ? 'Market data feed is disconnected. Dashboard shows last known prices. Reconnecting...'
+              : 'Market data may be stale. AI execution is paused until fresh data is restored.'}
+          </p>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
         
@@ -192,7 +340,7 @@ export default function Dashboard() {
             {/* Position Grid */}
             <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 content-start min-h-[300px]">
               {positions.length > 0 ? positions.map((pos) => {
-                const current = marketData?.price || latestTick?.price || pos.filled_price
+                const current = price || latestTick?.price || pos.filled_price
                 const isBuy = pos.direction === 'BUY'
                 const pnl = isBuy ? current - pos.filled_price : pos.filled_price - current
                 const isWin = pnl >= 0

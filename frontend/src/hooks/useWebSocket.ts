@@ -2,9 +2,10 @@
 // Custom React hook for WebSocket connection to the backend.
 
 import { useEffect, useRef, useState, useCallback } from 'react'
+import { useMarketStore } from './useMarketStore'
 
 export interface WSMessage {
-  type: 'CONNECTION' | 'HEARTBEAT' | 'TICK' | 'SIGNAL' | 'DECISION' | 'POSITION' | 'POSITION_CLOSED' | 'SYSTEM_STATUS' | 'EXECUTION' | 'AI_INSIGHT' | 'RECOMMENDATION'
+  type: 'CONNECTION' | 'HEARTBEAT' | 'TICK' | 'SIGNAL' | 'DECISION' | 'POSITION' | 'POSITION_CLOSED' | 'SYSTEM_STATUS' | 'EXECUTION' | 'AI_INSIGHT' | 'RECOMMENDATION' | 'MARKET_STATUS'
   timestamp: string
   [key: string]: any
 }
@@ -61,6 +62,11 @@ export function useWebSocket(url: string): UseWebSocketReturn {
             // Centralized message handling
             if (msg.type === 'TICK') {
               setLatestTick(msg.data)
+              // Feed into Zustand store for reactive dashboard updates
+              useMarketStore.getState().updateFromTick(msg.data)
+            } else if (msg.type === 'MARKET_STATUS') {
+              // Feed status updates into Zustand store
+              useMarketStore.getState().updateFeedStatus(msg.data)
             } else if (msg.type === 'SIGNAL') {
               setLatestSignal(msg.data)
             } else if (msg.type === 'SYSTEM_STATUS') {
@@ -71,7 +77,10 @@ export function useWebSocket(url: string): UseWebSocketReturn {
               setLatestRecommendation(msg.data)
             }
 
-            setMessages(prev => [msg, ...prev].slice(0, MAX_MESSAGES))
+            // Don't accumulate high-frequency TICK messages in the messages array
+            if (msg.type !== 'TICK' && msg.type !== 'HEARTBEAT' && msg.type !== 'MARKET_STATUS') {
+              setMessages(prev => [msg, ...prev].slice(0, MAX_MESSAGES))
+            }
           } catch (err) {
             console.error('Failed to parse WS message:', err)
           }
@@ -104,4 +113,3 @@ export function useWebSocket(url: string): UseWebSocketReturn {
 
   return { messages, isConnected, latestTick, latestSignal, latestStatus, latestInsight, latestRecommendation, sendMessage, clearMessages }
 }
-

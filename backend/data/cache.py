@@ -65,7 +65,7 @@ def aggregate_to_ohlcv(ticks: List[dict], timeframe: str = "1min") -> pd.DataFra
         return pd.DataFrame()
         
     df = pd.DataFrame(ticks)
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], format='ISO8601', utc=True)
     df.set_index("timestamp", inplace=True)
     df.sort_index(inplace=True)
     

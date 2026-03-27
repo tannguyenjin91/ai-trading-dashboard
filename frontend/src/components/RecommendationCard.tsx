@@ -22,6 +22,9 @@ export interface SignalRecommendation {
   nearest_fib_zone: string;
   trend_short: string;
   momentum: string;
+  mtf_bias_15m?: string;
+  mtf_setup_5m?: string;
+  mtf_timing_1m?: string;
   risk_reward_estimate: number;
   reasoning: string[];
   risk_note: string;
@@ -138,9 +141,32 @@ const RecommendationCard: React.FC<{ signal: SignalRecommendation | null }> = ({
 
         {/* Right Column: Context & Reasoning */}
         <div className="flex flex-col gap-3">
-          <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 border-b border-slate-800 pb-2">Technical Context</h4>
+          <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 border-b border-slate-800 pb-2">Multi-Timeframe Alignment</h4>
           
-          <div className="flex flex-wrap gap-2 text-[10px]">
+          <div className="flex items-center justify-between gap-2 p-2 bg-slate-900/40 rounded-lg border border-slate-800/50">
+            <div className="flex flex-col items-center text-center flex-1">
+              <span className="text-[9px] text-slate-500 uppercase mb-1">Bias (15m)</span>
+              <span className={`px-2 py-0.5 rounded text-[9px] font-bold ${signal.mtf_bias_15m === 'BULLISH' ? 'bg-teal-500/10 text-teal-400 border border-teal-500/20' : signal.mtf_bias_15m === 'BEARISH' ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}>
+                {signal.mtf_bias_15m || 'N/A'}
+              </span>
+            </div>
+            <div className="w-px h-6 bg-slate-800 shrink-0"></div>
+            <div className="flex flex-col items-center text-center flex-1">
+              <span className="text-[9px] text-slate-500 uppercase mb-1">Setup (5m)</span>
+              <span className={`px-2 py-0.5 rounded text-[9px] font-bold ${signal.mtf_setup_5m === 'NEUTRAL' || !signal.mtf_setup_5m ? 'bg-slate-800 text-slate-400 border border-slate-700' : 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20'}`}>
+                {signal.mtf_setup_5m ? signal.mtf_setup_5m.replace('_', ' ') : 'N/A'}
+              </span>
+            </div>
+            <div className="w-px h-6 bg-slate-800 shrink-0"></div>
+            <div className="flex flex-col items-center text-center flex-1">
+              <span className="text-[9px] text-slate-500 uppercase mb-1">Timing (1m)</span>
+              <span className={`px-2 py-0.5 rounded text-[9px] font-bold ${signal.mtf_timing_1m === 'CONFIRM_BUY' ? 'bg-teal-500/10 text-teal-400 border border-teal-500/20' : signal.mtf_timing_1m === 'CONFIRM_SELL' ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}>
+                {signal.mtf_timing_1m ? signal.mtf_timing_1m.replace('_', ' ') : 'WAIT'}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2 text-[10px] mt-1">
              <span className="px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700">
                <span className="text-slate-500 mr-1">Trend:</span> {signal.trend_short}
              </span>

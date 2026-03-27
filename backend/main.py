@@ -14,7 +14,7 @@ from loguru import logger
 
 from config.logging import setup_logging
 from config.settings import settings
-from data.feed import AsyncMockFeed
+from data.realtime_feed import RealtimeMarketFeed
 from data.cache import get_recent_ticks, aggregate_to_ohlcv
 from data.store import DiskDataStore
 
@@ -230,22 +230,34 @@ async def run_recommendation_loop(app: FastAPI):
             symbol = "VN30F1M"
             ticks = await get_recent_ticks(app.state.redis, symbol, limit=5000)
             if not ticks:
+                logger.debug("⏳ Skipping recommendation. No ticks found in cache.")
                 await asyncio.sleep(60)
                 continue
                 
-            df = aggregate_to_ohlcv(ticks, timeframe="1min")
-            if len(df) < 50:
+            df_1m = aggregate_to_ohlcv(ticks, timeframe="1min")
+            df_5m = aggregate_to_ohlcv(ticks, timeframe="5min")
+            df_15m = aggregate_to_ohlcv(ticks, timeframe="15min")
+            
+            if len(df_1m) < 50 or len(df_15m) < 10:
+                logger.debug(f"⏳ Skipping recommendation. Need 50/10, got {len(df_1m)}/{len(df_15m)} (Ticks: {len(ticks)})")
                 await asyncio.sleep(60)
                 continue
+            else:
+                logger.debug(f"✅ Data sufficient: 1m={len(df_1m)}, 5m={len(df_5m)}, 15m={len(df_15m)}")
             
             # 1. Generate Technical-First Signal
-            rec = app.state.recommender_engine.generate_recommendation(df, symbol)
+            rec = app.state.recommender_engine.generate_recommendation(df_1m, df_5m, df_15m, symbol)
             
+            if rec:
+                logger.success(f"MTF Engine generated {rec.recommendation} | Bias: {rec.bias} | Confidence: {rec.confidence}%")
+            else:
+                logger.warning("MTF Engine returned None")
+                
             # Process recommendation unconditionally every 15 mins
             if rec and app.state.ai_service:
-                # 2. Add AI Narrative Layer
+                # 2. Add AI Narrative Layer using 1m data for latest price context
                 from indicators.engine import build_features
-                features_df = build_features(df)
+                features_df = build_features(df_1m)
                 latest_candle = features_df.iloc[-1].to_dict()
                 
                 try:
@@ -389,9 +401,38 @@ async def lifespan(app: FastAPI):
     )
     app.state.execution_service.monitor = app.state.monitor # Attach monitor
 
-    # 4. Data Feed & Background Tasks
-    app.state.feed = AsyncMockFeed(app, manager, interval_sec=0.5)
-    await app.state.feed.sync_with_market(app.state.dnse_service) # Align with real market
+    # 4. Data Feed & Background Tasks — DNSE WebSocket + REST polling fallback
+    app.state.feed = RealtimeMarketFeed(
+        app=app,
+        websocket_manager=manager,
+        symbols=["VN30F1M"],
+        poll_interval_sec=settings.realtime_poll_interval,
+    )
+    await app.state.feed.sync_with_market(app.state.dnse_service)
+    
+    # [NEW] Preload history into in-memory cache for MTF engine
+    try:
+        from data.cache import _memory_store
+        logger.info("Preloading MTF cache history from DNSE...")
+        hist_bars = await app.state.dnse_service.fetch_history(symbol="VN30F1M", timeframe="1m", limit=300)
+        if hist_bars:
+            ticks = []
+            for bar in hist_bars:
+                tick = {
+                    "symbol": "VN30F1M",
+                    "price": float(bar.close),
+                    "volume": int(bar.volume),
+                    "timestamp": bar.timestamp.isoformat(),
+                    "source_timestamp": bar.timestamp.isoformat(),
+                    "is_mock": False,
+                    "metadata": {}
+                }
+                ticks.append(tick)
+            _memory_store["ticks:VN30F1M"] = ticks
+            logger.success(f"Preloaded {len(ticks)} 1m bars into cache for MTF warmup.")
+    except Exception as e:
+        logger.warning(f"Failed to preload history: {e}")
+
     app.state.feed.start()
     
     # 5. Background Strategy Loops

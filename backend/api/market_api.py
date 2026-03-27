@@ -1,5 +1,5 @@
 # backend/api/market_api.py
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from typing import Dict, Any
 from pydantic import BaseModel
 from loguru import logger
@@ -73,3 +73,36 @@ async def get_market_overview(symbol: str = "VN30F1M"):
         if market_cache["data"]:
             return market_cache["data"]
         return MarketOverviewResponse(symbol=symbol, price=0, change_pct=0, volume=0, last_updated=0)
+
+
+@router.get("/snapshot")
+async def get_market_snapshot(request: Request, symbol: str = "VN30F1M"):
+    """
+    Returns the live in-memory market snapshot (zero-latency).
+    Data is updated by the RealtimeMarketFeed via LiveMarketCache.
+    """
+    cache = getattr(request.app.state, "market_cache", None)
+    if not cache:
+        return {"error": "Market cache not initialized", "symbol": symbol}
+
+    snapshot = cache.get_snapshot_dict(symbol)
+    if not snapshot:
+        return {"symbol": symbol, "price": 0, "status": "no_data"}
+
+    # Merge feed status
+    feed = getattr(request.app.state, "feed", None)
+    feed_status = feed.get_status() if feed and hasattr(feed, "get_status") else {}
+
+    return {
+        **snapshot,
+        "feed_status": feed_status,
+    }
+
+
+@router.get("/feed-status")
+async def get_feed_status(request: Request):
+    """Returns the current status of the realtime data feed."""
+    feed = getattr(request.app.state, "feed", None)
+    if not feed or not hasattr(feed, "get_status"):
+        return {"error": "Feed not initialized"}
+    return feed.get_status()

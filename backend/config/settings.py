@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr = Field(default="", description="Google Gemini API key")
     anthropic_api_key: SecretStr = Field(default="", description="Anthropic Claude API key")
     dnse_api_key: SecretStr = Field(default="", description="DNSE API key")
+    dnse_username: str = Field(default="", description="DNSE login username for LightSpeed WebSocket")
+    dnse_password: SecretStr = Field(default="", description="DNSE login password for LightSpeed WebSocket")
     default_ai_model: AIModel = Field(default=AIModel.GEMINI, description="Default LLM provider")
 
     # ─── TCBS Broker ─────────────────────────────────────────────────────────
@@ -59,6 +61,7 @@ class Settings(BaseSettings):
     max_risk_per_trade_pct: float = Field(default=2.0, description="Max risk per trade as % of NAV")
     max_daily_drawdown_pct: float = Field(default=5.0, description="Daily drawdown killswitch threshold")
     agent_cycle_interval: int = Field(default=30, description="Seconds between agent loop runs")
+    realtime_poll_interval: float = Field(default=5.0, description="Seconds between REST polling fallback for market data")
     min_confluence_score: int = Field(default=6, description="Minimum /10 confluence to execute")
     min_reward_risk: float = Field(default=2.0, description="Minimum reward:risk ratio")
     min_confidence_pct: float = Field(default=70.0, description="Minimum AI confidence % to execute")

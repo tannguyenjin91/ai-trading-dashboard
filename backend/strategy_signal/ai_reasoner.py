@@ -37,6 +37,25 @@ class AIReasoningService:
             logger.debug(f"Skipping AI analysis: {active_positions_count} active position(s) exist.")
             return None
             
+        # 1.5 Check if market is open
+        from data.realtime_feed import is_vn_market_open
+        if not is_vn_market_open():
+            logger.info(f"Market Closed: Overriding {symbol} signal to WAIT (Action: HOLD)")
+            return TradeIntent(
+                strategy_name="AI_Orchestrator_v1",
+                symbol=symbol,
+                action=TradeAction.HOLD,
+                confidence=100.0,
+                entry_type=OrderType.MARKET,
+                entry_price=None,
+                qty=0,
+                stop_loss=None,
+                take_profit=None,
+                reason="Market is currently closed. Evaluating based on last closing price. Action forced to WAIT.",
+                timeframe="1m",
+                metadata={"action": "HOLD", "rationale": "Market is currently closed."}
+            )
+            
         # 2. Run Deterministic Strategies for Confluence
         strategy_signals = []
         market_state = {"df": df, "symbol": symbol}
@@ -185,11 +204,27 @@ class AIReasoningService:
                 fib_data=fib_data
             )
 
-            logger.debug("Generating rich market AI insight...")
-            ai_dict = await self.llm.analyze_market(INSIGHT_SYSTEM_PROMPT, user_prompt)
+            from data.realtime_feed import is_vn_market_open
+            if not is_vn_market_open():
+                logger.debug("Market is closed. Skipping LLM insight generation.")
+                ai_dict = {
+                    "regime": "CLOSED",
+                    "bias": "NEUTRAL",
+                    "one_liner": "Thị trường đang đóng cửa. Dữ liệu dựa trên giá đóng cửa phiên trước.",
+                    "trend_short": "NEUTRAL",
+                    "trend_medium": "NEUTRAL",
+                    "momentum": "FLAT",
+                    "scenario_bullish": "Chờ phiên giao dịch tiếp theo.",
+                    "scenario_bearish": "Chờ phiên giao dịch tiếp theo.",
+                    "risk_note": "Thị trường nghỉ giao dịch.",
+                    "confidence": 0,
+                }
+            else:
+                logger.debug("Generating rich market AI insight...")
+                ai_dict = await self.llm.analyze_market(INSIGHT_SYSTEM_PROMPT, user_prompt)
 
-            if not ai_dict:
-                return None
+                if not ai_dict:
+                    return None
 
             # --- 4. Assemble full MarketSummary combining real calcs + LLM narrative ---
             summary = MarketSummary(

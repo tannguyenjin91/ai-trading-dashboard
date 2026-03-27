@@ -78,6 +78,9 @@ class SignalRecommendation(BaseModel):
     timeframe: str = "15m"
     recommendation: Literal["BUY", "SELL", "HOLD", "WAIT"] = "WAIT"
     bias: Literal["BULLISH", "BEARISH", "NEUTRAL"] = "NEUTRAL"
+    mtf_bias_15m: str = "NEUTRAL"
+    mtf_setup_5m: str = "NEUTRAL"
+    mtf_timing_1m: str = "NEUTRAL"
     confidence: float = 0.0
     
     # Technical Levels (Hard Math)

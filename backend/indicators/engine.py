@@ -280,3 +280,47 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     features["supertrend_dir"] = st_dir
     
     return features
+
+
+def validate_technical_data(df: pd.DataFrame) -> dict:
+    """
+    Validates whether the DataFrame has sufficient computed indicators.
+    Returns a dict with data_quality level and list of missing indicator groups.
+    """
+    if df is None or df.empty:
+        return {"data_quality": "price_action_only", "missing_indicators": ["all"]}
+
+    last = df.iloc[-1]
+    missing = []
+
+    # Check each indicator group
+    indicator_checks = {
+        "ema": ["ema_9", "ema_21"],
+        "rsi": ["rsi_14"],
+        "macd": ["macd_line", "macd_signal", "macd_hist"],
+        "bollinger": ["bb_upper", "bb_middle", "bb_lower"],
+        "atr": ["atr_14"],
+        "adx": ["adx_14"],
+        "vwap": ["vwap"],
+        "supertrend": ["supertrend", "supertrend_dir"],
+    }
+
+    for group_name, columns in indicator_checks.items():
+        for col in columns:
+            if col not in df.columns:
+                missing.append(group_name)
+                break
+            val = last.get(col)
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                missing.append(group_name)
+                break
+
+    # Remove duplicates
+    missing = list(dict.fromkeys(missing))
+
+    if not missing:
+        return {"data_quality": "full", "missing_indicators": []}
+    elif len(missing) <= 3:
+        return {"data_quality": "partial", "missing_indicators": missing}
+    else:
+        return {"data_quality": "price_action_only", "missing_indicators": missing}

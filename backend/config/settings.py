@@ -12,6 +12,7 @@ class AIModel(str, Enum):
     """Supported AI model providers."""
     GEMINI = "gemini"
     CLAUDE = "claude"
+    QWEN = "qwen"
 
 
 class Environment(str, Enum):
@@ -36,6 +37,7 @@ class Settings(BaseSettings):
     # ─── AI Models ───────────────────────────────────────────────────────────
     gemini_api_key: SecretStr = Field(default="", description="Google Gemini API key")
     anthropic_api_key: SecretStr = Field(default="", description="Anthropic Claude API key")
+    qwen_api_key: SecretStr = Field(default="", description="Qwen API key")
     dnse_api_key: SecretStr = Field(default="", description="DNSE API key")
     dnse_username: str = Field(default="", description="DNSE login username for LightSpeed WebSocket")
     dnse_password: SecretStr = Field(default="", description="DNSE login password for LightSpeed WebSocket")

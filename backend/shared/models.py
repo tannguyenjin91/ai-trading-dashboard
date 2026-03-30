@@ -18,7 +18,7 @@ class MarketSummary(BaseModel):
     # === Core ===
     symbol: str = "VN30F1M"
     generated_at: datetime = Field(default_factory=datetime.now)
-    regime: Literal["TRENDING_UP", "TRENDING_DOWN", "CHOPPY", "VOLATILE"] = "CHOPPY"
+    regime: Literal["TRENDING_UP", "TRENDING_DOWN", "CHOPPY", "VOLATILE", "CLOSED"] = "CHOPPY"
     bias: Literal["BULLISH", "BEARISH", "NEUTRAL"] = "NEUTRAL"
     confidence: int = 50  # 0-100
 
@@ -32,7 +32,7 @@ class MarketSummary(BaseModel):
     # === Trend ===
     trend_short: str = "NEUTRAL"
     trend_medium: str = "NEUTRAL"
-    momentum: Literal["STRONG", "MODERATE", "WEAK"] = "WEAK"
+    momentum: Literal["STRONG", "MODERATE", "WEAK", "FLAT"] = "WEAK"
 
     # === Key Levels ===
     supports: List[float] = Field(default_factory=list)
@@ -61,6 +61,12 @@ class MarketSummary(BaseModel):
     scenario_bullish: str = ""
     scenario_bearish: str = ""
     risk_note: str = ""
+    ai_source: str = ""
+
+    # === Data Quality ===
+    data_quality: Literal["full", "partial", "price_action_only"] = "full"
+    missing_indicators: List[str] = Field(default_factory=list)
+    bars_used: int = 0
 
 
 class EntryZone(BaseModel):
@@ -148,6 +154,7 @@ class TradeIntent(BaseModel):
     timeframe: str
     paper_mode: bool = True
     risk_note: Optional[str] = None
+    ai_source: str = ""
     created_at: datetime = Field(default_factory=datetime.now)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 

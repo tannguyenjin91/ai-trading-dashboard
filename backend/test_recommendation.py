@@ -92,6 +92,7 @@ async def run_test():
                 rec.reasoning = [raw_reasoning]
             
             rec.risk_note = ai_dict.get("risk_note", "")
+            rec.ai_source = ai_service.llm.provider.upper()
             
             for r in rec.reasoning:
                 print(f"  >> {r}")
@@ -114,7 +115,8 @@ async def run_test():
         f"🎯 <b>Vùng Mua/Bán:</b> {entry_str}\n"
         f"🛡 <b>Stop Loss:</b> {stop_str}\n"
         f"🚀 <b>Take Profit:</b> {targets_str}\n"
-        f"📈 <b>Confidence:</b> {rec.confidence}%\n\n"
+        f"📈 <b>Confidence:</b> {rec.confidence}%\n"
+        f"🤖 <b>AI Source:</b> {getattr(rec, 'ai_source', 'N/A')}\n\n"
         f"💬 <b>Phân tích:</b> {reason_str}\n\n"
         f"⚠️ <i>Rủi ro: {rec.risk_note}</i>\n"
     )

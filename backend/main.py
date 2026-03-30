@@ -152,7 +152,10 @@ async def run_analysis_loop(app: FastAPI):
             logger.error(f"Analysis loop critical error: {e}")
 
 async def run_ai_insight_loop(app: FastAPI):
-    """Periodically queries LLM for general market framework to display on dashboard."""
+    """Periodically queries LLM for general market framework to display on dashboard.
+    Uses DNSE historical bars (15m, 100 bars) for high-quality indicator computation.
+    Falls back to tick aggregation if DNSE is unavailable.
+    """
     await asyncio.sleep(15) # Wait 15s on startup to let data feed populate
     while True:
         try:
@@ -161,18 +164,47 @@ async def run_ai_insight_loop(app: FastAPI):
                 continue
             
             symbol = "VN30F1M"
-            ticks = await get_recent_ticks(app.state.redis, symbol, limit=5000)
-            if not ticks:
-                await asyncio.sleep(60) # retry sooner if no data
-                continue
-                
-            df = aggregate_to_ohlcv(ticks, timeframe="1min")
-            if len(df) < 20: 
-                await asyncio.sleep(60) # retry sooner if not enough data
+            df = None
+            data_source = "none"
+            
+            # PRIMARY: Fetch directly from DNSE API (100 bars, 15m) for quality indicators
+            if hasattr(app.state, "dnse_service") and app.state.dnse_service:
+                try:
+                    bars = await app.state.dnse_service.fetch_history(symbol, timeframe="15m", limit=200)
+                    if bars and len(bars) >= 30:
+                        import pandas as pd
+                        df_data = [{
+                            "timestamp": b.timestamp,
+                            "open": b.open, "high": b.high,
+                            "low": b.low, "close": b.close,
+                            "volume": b.volume
+                        } for b in bars]
+                        df = pd.DataFrame(df_data)
+                        df.set_index("timestamp", inplace=True)
+                        data_source = f"DNSE(15m, {len(bars)} bars)"
+                        logger.info(f"AI Insight using {data_source}")
+                    else:
+                        logger.warning(f"DNSE returned only {len(bars) if bars else 0} bars, need >=30")
+                except Exception as e:
+                    logger.warning(f"DNSE fetch failed for AI insight: {e}")
+            
+            # FALLBACK: Use tick aggregation if DNSE unavailable
+            if df is None:
+                ticks = await get_recent_ticks(app.state.redis, symbol, limit=5000)
+                if ticks:
+                    df = aggregate_to_ohlcv(ticks, timeframe="1min")
+                    data_source = f"TickCache(1min, {len(df)} bars)"
+                    logger.info(f"AI Insight fallback to {data_source}")
+            
+            if df is None or len(df) < 20:
+                logger.debug(f"AI Insight: insufficient data ({len(df) if df is not None else 0} bars)")
+                await asyncio.sleep(60)
                 continue
                 
             insight = await app.state.ai_service.generate_market_insight(df)
             if insight:
+                insight["_data_source"] = data_source  # For debugging
+                
                 await manager.broadcast({
                     "type": "AI_INSIGHT",
                     "data": insight
@@ -193,9 +225,17 @@ async def run_ai_insight_loop(app: FastAPI):
                     price = insight.get("current_price", 0)
                     change_pct = insight.get("price_change_pct", 0)
                     regime = insight.get("regime", "UNKNOWN")
+                    dq = insight.get("data_quality", "unknown")
+                    ai_src = insight.get("ai_source", "")
+                    bars_used = insight.get("bars_used", 0)
+                    missing = insight.get("missing_indicators", [])
                     
                     s_str = " / ".join(f"{s:,.0f}" for s in supports[:2]) if supports else "N/A"
                     r_str = " / ".join(f"{r:,.0f}" for r in resistances[:2]) if resistances else "N/A"
+                    
+                    # Data quality badge
+                    dq_badge = "✅ Full" if dq == "full" else ("⚠️ Partial" if dq == "partial" else "❌ Price Action Only")
+                    missing_str = f"\n⚠️ Thiếu: {', '.join(missing)}" if missing else ""
                     
                     tg_message = (
                         f"{bias_emoji} <b>AI Market Insight — VN30F1M</b>\n\n"
@@ -207,7 +247,8 @@ async def run_ai_insight_loop(app: FastAPI):
                         f"📈 Bull: {scenario_bull}\n"
                         f"📉 Bear: {scenario_bear}\n\n"
                         f"⚠️ {risk_note}\n"
-                        f"<i>Confidence: {confidence}%</i>"
+                        f"<i>Confidence: {confidence}% | 🤖 {ai_src} | Bars: {bars_used} | Data: {dq_badge}</i>"
+                        f"{missing_str}"
                     )
                     asyncio.create_task(app.state.notifier.send_message(tg_message))
 

@@ -54,7 +54,7 @@ class TelegramNotifier:
             f"<b>Symbol:</b> {intent.symbol}\n"
             f"<b>Action:</b> {intent.action}\n"
             f"<b>Confidence:</b> {intent.confidence}%\n"
-            f"<b>Reason:</b> {intent.reason}\n"
+            f"<b>Reason ({intent.ai_source.upper()}):</b> {intent.reason}\n"
             f"<b>Time:</b> {intent.created_at.strftime('%H:%M:%S')}\n"
             f"\n<i>#Signal #{intent.symbol}</i>"
         )

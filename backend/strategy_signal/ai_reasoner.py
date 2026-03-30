@@ -136,6 +136,7 @@ class AIReasoningService:
             take_profit=[float(tp) for tp in tps] if isinstance(tps, list) else None,
             reason=decision_dict.get("rationale", "AI confirmed signal"),
             timeframe="1m",
+            ai_source=self.llm.provider.upper(),
             metadata=decision_dict
         )
         
@@ -147,14 +148,30 @@ class AIReasoningService:
         Periodically fetches market context to generate a rich structured dashboard insight.
         Computes S/R, Fibonacci, and full indicator context, then queries LLM.
         Returns a dict compatible with MarketSummary for WebSocket broadcast.
+        
+        Data quality aware: validates indicators instead of using misleading fallbacks.
         """
         try:
-            from indicators.engine import build_features, calculate_support_resistance, calculate_fibonacci
+            from indicators.engine import build_features, calculate_support_resistance, calculate_fibonacci, validate_technical_data
             from shared.models import MarketSummary, FibonacciLevel
+            import math
+            
+            bars_count = len(df)
+            logger.info(f"AI Insight: Processing {bars_count} bars for market insight")
             
             features_df = build_features(df)
             if features_df is None or features_df.empty:
                 return None
+
+            # --- 0. Validate data quality ---
+            quality_report = validate_technical_data(features_df)
+            data_quality = quality_report["data_quality"]
+            missing_indicators = quality_report["missing_indicators"]
+            
+            if missing_indicators:
+                logger.warning(f"AI Insight data quality: {data_quality} | Missing: {missing_indicators} | Bars: {bars_count}")
+            else:
+                logger.info(f"AI Insight data quality: FULL | Bars: {bars_count}")
 
             # --- 1. Compute quantitative context from real data ---
             last = features_df.iloc[-1]
@@ -167,26 +184,62 @@ class AIReasoningService:
             price_change = round(current_price - open_price, 1)
             price_change_pct = round((price_change / open_price * 100) if open_price else 0, 2)
 
-            ema9 = float(last.get("ema_9", 0))
-            ema21 = float(last.get("ema_21", 0))
-            rsi = float(last.get("rsi_14", 50))
-            macd_hist = float(last.get("macd_hist", 0))
-            adx = float(last.get("adx_14", 0))
-            atr = float(last.get("atr_14", 0))
-            st_dir = int(last.get("supertrend_dir", 0))
+            # Helper: safe read — returns None if NaN or missing instead of fallback
+            def safe_float(series_val, default=None):
+                if series_val is None:
+                    return default
+                try:
+                    v = float(series_val)
+                    return default if (math.isnan(v) or math.isinf(v)) else v
+                except (ValueError, TypeError):
+                    return default
+
+            ema9 = safe_float(last.get("ema_9"), None)
+            ema21 = safe_float(last.get("ema_21"), None)
+            rsi = safe_float(last.get("rsi_14"), None)
+            macd_hist = safe_float(last.get("macd_hist"), None)
+            adx = safe_float(last.get("adx_14"), None)
+            atr = safe_float(last.get("atr_14"), None)
+            bb_upper = safe_float(last.get("bb_upper"), None)
+            bb_lower = safe_float(last.get("bb_lower"), None)
+            vwap = safe_float(last.get("vwap"), None)
+            st_dir_raw = safe_float(last.get("supertrend_dir"), None)
+            st_dir = int(st_dir_raw) if st_dir_raw is not None else 0
 
             # Volume ratio: current vs 20-bar average
             avg_vol = float(features_df["volume"].tail(20).mean())
             current_vol = float(last["volume"])
             vol_ratio = round(current_vol / avg_vol, 2) if avg_vol > 0 else 1.0
 
-            # EMA position
-            price_vs_ema9 = "ABOVE" if current_price > ema9 else ("BELOW" if current_price < ema9 else "AT")
-            price_vs_ema21 = "ABOVE" if current_price > ema21 else ("BELOW" if current_price < ema21 else "AT")
+            # EMA position (only if EMA values exist)
+            if ema9 is not None:
+                price_vs_ema9 = "ABOVE" if current_price > ema9 else ("BELOW" if current_price < ema9 else "AT")
+            else:
+                price_vs_ema9 = "AT"
+            if ema21 is not None:
+                price_vs_ema21 = "ABOVE" if current_price > ema21 else ("BELOW" if current_price < ema21 else "AT")
+            else:
+                price_vs_ema21 = "AT"
 
             # --- 2. Calculate S/R and Fibonacci from real price structure ---
             sr_levels = calculate_support_resistance(features_df, lookback=20)
             fib_data = calculate_fibonacci(features_df, lookback=30)
+            
+            # Track S/R and Fib insufficiency
+            if not sr_levels.get("supports") and not sr_levels.get("resistances"):
+                if "support_resistance" not in missing_indicators:
+                    missing_indicators.append("support_resistance")
+            if not fib_data or not fib_data.get("levels"):
+                if "fibonacci" not in missing_indicators:
+                    missing_indicators.append("fibonacci")
+
+            # Recalculate quality based on final missing list
+            if not missing_indicators:
+                data_quality = "full"
+            elif len(missing_indicators) <= 3:
+                data_quality = "partial"
+            else:
+                data_quality = "price_action_only"
 
             fib_levels = []
             if fib_data and fib_data.get("levels"):
@@ -203,6 +256,10 @@ class AIReasoningService:
                 sr_levels=sr_levels,
                 fib_data=fib_data
             )
+            
+            # Append data quality warning to prompt so LLM knows
+            if data_quality != "full":
+                user_prompt += f"\n\n[DATA QUALITY WARNING]\nChất lượng dữ liệu: {data_quality.upper()}\nChỉ báo thiếu: {', '.join(missing_indicators)}\nSố nến: {bars_count}\nHãy lưu ý trong phân tích: chỉ dùng dữ liệu có sẵn, nếu thiếu hãy ghi rõ trong risk_note."
 
             from data.realtime_feed import is_vn_market_open
             if not is_vn_market_open():
@@ -235,14 +292,14 @@ class AIReasoningService:
                 period_high=period_high,
                 period_low=period_low,
 
-                # Indicators (from real data)
-                rsi=rsi,
-                macd_hist=round(macd_hist, 4),
-                adx=round(adx, 1),
-                atr=round(atr, 2),
+                # Indicators (from real data — use 0.0 only when truly None for JSON compat)
+                rsi=round(rsi, 1) if rsi is not None else 0.0,
+                macd_hist=round(macd_hist, 4) if macd_hist is not None else 0.0,
+                adx=round(adx, 1) if adx is not None else 0.0,
+                atr=round(atr, 2) if atr is not None else 0.0,
                 volume_ratio=vol_ratio,
-                ema9=round(ema9, 1),
-                ema21=round(ema21, 1),
+                ema9=round(ema9, 1) if ema9 is not None else 0.0,
+                ema21=round(ema21, 1) if ema21 is not None else 0.0,
                 price_vs_ema9=price_vs_ema9,
                 price_vs_ema21=price_vs_ema21,
                 supertrend_dir=st_dir,
@@ -252,10 +309,10 @@ class AIReasoningService:
                 resistances=sr_levels.get("resistances", []),
 
                 # Fibonacci (from real data)
-                swing_high=fib_data.get("swing_high", 0.0),
-                swing_low=fib_data.get("swing_low", 0.0),
+                swing_high=fib_data.get("swing_high", 0.0) if fib_data else 0.0,
+                swing_low=fib_data.get("swing_low", 0.0) if fib_data else 0.0,
                 fibonacci_levels=fib_levels,
-                nearest_fib_zone=fib_data.get("nearest_level", ""),
+                nearest_fib_zone=fib_data.get("nearest_level", "") if fib_data else "",
 
                 # AI narrative (from LLM)
                 regime=ai_dict.get("regime", "CHOPPY"),
@@ -268,11 +325,19 @@ class AIReasoningService:
                 scenario_bearish=ai_dict.get("scenario_bearish", ""),
                 risk_note=ai_dict.get("risk_note", ""),
                 confidence=int(ai_dict.get("confidence", 50)),
+                ai_source=self.llm.provider.upper(),
+                
+                # Data quality metadata
+                data_quality=data_quality,
+                missing_indicators=missing_indicators,
+                bars_used=bars_count,
             )
 
             return summary.model_dump(mode="json")
 
         except Exception as e:
             logger.error(f"Failed to generate AI insight: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 

@@ -20,6 +20,7 @@ class AIClient:
         self.provider = settings.default_ai_model.value
         self.gemini_client = None
         self.anthropic_client = None
+        self.qwen_client = None
         
         if "gemini" in self.provider.lower():
             if not settings.gemini_api_key:
@@ -33,18 +34,35 @@ class AIClient:
             else:
                 self.anthropic_client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key.get_secret_value())
                 self.model_name = "claude-3-5-sonnet-20241022"
+        elif "qwen" in self.provider.lower():
+            if not settings.qwen_api_key:
+                logger.warning("Qwen API key not found. LLM calls will fail.")
+            else:
+                try:
+                    from openai import AsyncOpenAI
+                except ImportError:
+                    logger.error("Please install openai package to use Qwen.")
+                    self.qwen_client = None
+                else:
+                    self.qwen_client = AsyncOpenAI(
+                        api_key=settings.qwen_api_key.get_secret_value(),
+                        base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+                    )
+                    self.model_name = "qwen-plus"
 
     async def analyze_market(self, system_prompt: str, user_prompt: str) -> Optional[Dict[str, Any]]:
         """
         Sends the market context to the configured LLM and enforces a JSON return.
         """
         try:
-            if self.gemini_client:
+            if self.gemini_client and "gemini" in self.provider:
                 return await self._call_gemini(system_prompt, user_prompt)
-            elif self.anthropic_client:
+            elif self.anthropic_client and "claude" in self.provider:
                 return await self._call_anthropic(system_prompt, user_prompt)
+            elif self.qwen_client and "qwen" in self.provider:
+                return await self._call_qwen(system_prompt, user_prompt)
             else:
-                logger.error("No LLM clients initialized.")
+                logger.error(f"No LLM clients initialized for provider: {self.provider}")
                 return None
         except Exception as e:
             logger.error(f"LLM generation failed: {e}")
@@ -132,4 +150,47 @@ class AIClient:
             return json.loads(text.strip())
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse Claude JSON: {e}\nRaw output: {text}")
+            return None
+
+    async def _call_qwen(self, system_prompt: str, user_prompt: str) -> Optional[Dict[str, Any]]:
+        try:
+            response = await self.qwen_client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt + "\n\nProvide ONLY valid JSON output."}
+                ],
+                temperature=0.1,
+                max_tokens=1000
+            )
+            
+            if not response.choices:
+                return None
+                
+            text = response.choices[0].message.content.strip()
+            
+            # Clean up potential markdown
+            if text.startswith("```json"):
+                text = text.replace("```json", "", 1)
+            if text.endswith("```"):
+                text = text.rsplit("```", 1)[0]
+            
+            # Extract JSON cleanly like Gemini
+            start = text.find("{")
+            if start == -1:
+                return None
+            
+            depth = 0
+            end = start
+            for i, ch in enumerate(text[start:], start):
+                if ch == "{": depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+            
+            return json.loads(text[start:end + 1])
+        except Exception as e:
+            logger.error(f"Failed to parse Qwen JSON or call API: {e}")
             return None

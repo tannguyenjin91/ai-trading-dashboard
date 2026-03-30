@@ -1,7 +1,7 @@
 // frontend/src/components/MarketInsightCard.tsx
 // Renders the rich MarketSummary structured output from the AI pipeline.
 
-import { TrendingUp, TrendingDown, Minus, Zap, ShieldAlert, Target } from 'lucide-react'
+import { TrendingUp, TrendingDown, Minus, Zap, ShieldAlert, Target, Database, AlertTriangle } from 'lucide-react'
 
 interface FibLevel {
   level: number
@@ -40,6 +40,11 @@ export interface MarketInsightData {
   scenario_bearish: string
   risk_note: string
   confidence: number
+  // Data quality fields
+  data_quality?: 'full' | 'partial' | 'price_action_only'
+  missing_indicators?: string[]
+  ai_source?: string
+  bars_used?: number
 }
 
 const BIAS_CONFIG = {
@@ -110,6 +115,22 @@ export default function MarketInsightCard({ insight }: { insight: MarketInsightD
           </span>
         </div>
         <div className="flex items-center gap-2">
+          {/* Data Quality Badge */}
+          {insight.data_quality && (
+            <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider ${
+              insight.data_quality === 'full' ? 'bg-teal-500/15 text-teal-400 border border-teal-500/20' :
+              insight.data_quality === 'partial' ? 'bg-amber-500/15 text-amber-400 border border-amber-500/20' :
+              'bg-red-500/15 text-red-400 border border-red-500/20'
+            }`}>
+              <Database size={8} className="inline mr-0.5" />
+              {insight.data_quality === 'full' ? 'Full Data' : insight.data_quality === 'partial' ? 'Partial' : 'Price Only'}
+            </span>
+          )}
+          {insight.ai_source && (
+            <span className="px-1.5 py-0.5 rounded text-[8px] font-bold bg-violet-500/15 text-violet-400 border border-violet-500/20 uppercase">
+              {insight.ai_source}
+            </span>
+          )}
           <span className="text-[9px] text-slate-500 uppercase tracking-wider">Confidence</span>
           <span className={`text-xs font-bold ${insight.confidence >= 65 ? 'text-teal-400' : insight.confidence >= 45 ? 'text-amber-400' : 'text-red-400'}`}>
             {insight.confidence}%
@@ -118,6 +139,28 @@ export default function MarketInsightCard({ insight }: { insight: MarketInsightD
       </div>
 
       <div className="p-4 space-y-3.5">
+        {/* ── DATA QUALITY WARNING ────────────────────────────────── */}
+        {insight.data_quality && insight.data_quality !== 'full' && (
+          <div className={`flex items-start gap-1.5 rounded p-2 text-[10px] ${
+            insight.data_quality === 'partial'
+              ? 'bg-amber-500/5 border border-amber-500/15 text-amber-300/80'
+              : 'bg-red-500/5 border border-red-500/15 text-red-300/80'
+          }`}>
+            <AlertTriangle size={11} className="mt-0.5 shrink-0" />
+            <div>
+              <span className="font-bold">
+                {insight.data_quality === 'partial' ? 'Dữ liệu kỹ thuật không đầy đủ' : 'Chỉ có dữ liệu Price Action'}
+              </span>
+              {insight.missing_indicators && insight.missing_indicators.length > 0 && (
+                <span className="ml-1 opacity-70">— Thiếu: {insight.missing_indicators.join(', ')}</span>
+              )}
+              {insight.bars_used && (
+                <span className="ml-1 opacity-50">({insight.bars_used} nến)</span>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* ── ONE-LINER ─────────────────────────────────────────────── */}
         {insight.one_liner && (
           <p className="text-xs text-slate-200 leading-relaxed font-medium border-l-2 border-teal-500/40 pl-3">
@@ -156,50 +199,64 @@ export default function MarketInsightCard({ insight }: { insight: MarketInsightD
             <Target size={9} /> Vùng Quan Trọng
           </p>
           <div className="space-y-1">
-            {insight.resistances?.length > 0 && (
+            {insight.resistances?.length > 0 ? (
               <div className="flex items-center gap-1.5 flex-wrap">
                 <span className="text-[9px] text-red-400 w-14 shrink-0">Kháng cự</span>
                 {insight.resistances.slice(0, 3).map((r, i) => (
                   <LevelBadge key={i} price={r} type="resistance" />
                 ))}
               </div>
+            ) : (
+              <div className="flex items-center gap-1.5">
+                <span className="text-[9px] text-red-400 w-14 shrink-0">Kháng cự</span>
+                <span className="text-[9px] text-slate-600 italic">Chưa đủ dữ liệu (cần ≥42 nến)</span>
+              </div>
             )}
-            {insight.supports?.length > 0 && (
+            {insight.supports?.length > 0 ? (
               <div className="flex items-center gap-1.5 flex-wrap">
                 <span className="text-[9px] text-teal-400 w-14 shrink-0">Hỗ trợ</span>
                 {insight.supports.slice(0, 3).map((s, i) => (
                   <LevelBadge key={i} price={s} type="support" />
                 ))}
               </div>
+            ) : (
+              <div className="flex items-center gap-1.5">
+                <span className="text-[9px] text-teal-400 w-14 shrink-0">Hỗ trợ</span>
+                <span className="text-[9px] text-slate-600 italic">Chưa đủ dữ liệu (cần ≥42 nến)</span>
+              </div>
             )}
           </div>
         </div>
 
         {/* ── FIBONACCI ─────────────────────────────────────────────── */}
-        {keyFibs.length > 0 && (
-          <div>
-            <p className="text-[9px] text-slate-500 uppercase tracking-widest mb-1.5">
-              Fibonacci (Swing: {insight.swing_low?.toLocaleString()} — {insight.swing_high?.toLocaleString()})
-            </p>
-            <div className="flex flex-wrap gap-1">
-              {keyFibs.map((fl) => {
-                const isNearest = insight.nearest_fib_zone?.includes(fl.level.toFixed(3))
-                return (
-                  <div key={fl.level} className={`px-1.5 py-0.5 rounded text-[9px] font-mono border ${
-                    isNearest
-                      ? 'bg-amber-500/20 border-amber-500/40 text-amber-300 font-bold'
-                      : 'bg-slate-800/60 border-white/5 text-slate-400'
-                  }`}>
-                    {(fl.level * 100).toFixed(1)}% · {fl.price.toLocaleString('en-US', { minimumFractionDigits: 1 })}
-                  </div>
-                )
-              })}
-            </div>
-            {insight.nearest_fib_zone && (
-              <p className="text-[9px] text-amber-400/80 mt-1">📍 Gần nhất: {insight.nearest_fib_zone}</p>
-            )}
-          </div>
-        )}
+        <div>
+          <p className="text-[9px] text-slate-500 uppercase tracking-widest mb-1.5">
+            Fibonacci {keyFibs.length > 0 && `(Swing: ${insight.swing_low?.toLocaleString()} — ${insight.swing_high?.toLocaleString()})`}
+          </p>
+          {keyFibs.length > 0 ? (
+            <>
+              <div className="flex flex-wrap gap-1">
+                {keyFibs.map((fl) => {
+                  const isNearest = insight.nearest_fib_zone?.includes(fl.level.toFixed(3))
+                  return (
+                    <div key={fl.level} className={`px-1.5 py-0.5 rounded text-[9px] font-mono border ${
+                      isNearest
+                        ? 'bg-amber-500/20 border-amber-500/40 text-amber-300 font-bold'
+                        : 'bg-slate-800/60 border-white/5 text-slate-400'
+                    }`}>
+                      {(fl.level * 100).toFixed(1)}% · {fl.price.toLocaleString('en-US', { minimumFractionDigits: 1 })}
+                    </div>
+                  )
+                })}
+              </div>
+              {insight.nearest_fib_zone && (
+                <p className="text-[9px] text-amber-400/80 mt-1">📍 Gần nhất: {insight.nearest_fib_zone}</p>
+              )}
+            </>
+          ) : (
+            <p className="text-[9px] text-slate-600 italic">Chưa đủ dữ liệu (cần ≥30 nến)</p>
+          )}
+        </div>
 
         {/* ── INDICATOR GRID ────────────────────────────────────────── */}
         <div className="grid grid-cols-2 gap-x-4 border-t border-white/5 pt-3">

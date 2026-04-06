@@ -6,7 +6,7 @@ from typing import Optional, Tuple, List
 from loguru import logger
 from datetime import datetime
 
-from indicators.engine import build_features, calculate_support_resistance, calculate_fibonacci
+from indicators.engine import build_features, calculate_atr, calculate_support_resistance, calculate_fibonacci
 from shared.models import SignalRecommendation, EntryZone
 
 class SignalRecommenderEngine:
@@ -19,6 +19,9 @@ class SignalRecommenderEngine:
         # Configuration thresholds
         self.atr_buffer_mult = 1.0
         self.min_rr_ratio = 1.5
+        self.trailing_stop_timeframe = "10min"
+        self.trailing_stop_atr_period = 14
+        self.trailing_stop_atr_multiplier = 2.0
 
     def _find_closest_levels(self, current_price: float, supports: List[float], resistances: List[float]) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
         """
@@ -35,6 +38,22 @@ class SignalRecommenderEngine:
         next_res = res_above[1] if len(res_above) > 1 else imm_res
 
         return imm_sup, next_sup, imm_res, next_res
+
+    def _build_trailing_stop_plan(self, df_1m: pd.DataFrame, current_price: float) -> tuple[float, float]:
+        df_10m = (
+            df_1m.resample(self.trailing_stop_timeframe)
+            .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+            .dropna()
+        )
+        atr_value = None
+        if len(df_10m) >= self.trailing_stop_atr_period:
+            atr_series = calculate_atr(df_10m, self.trailing_stop_atr_period).dropna()
+            if not atr_series.empty:
+                atr_value = float(atr_series.iloc[-1])
+        if atr_value is None or atr_value <= 0:
+            atr_value = current_price * 0.0035
+        trailing_offset = max(atr_value * self.trailing_stop_atr_multiplier, current_price * 0.003)
+        return round(atr_value, 1), round(trailing_offset, 1)
 
     def generate_recommendation(
         self, df_1m: pd.DataFrame, df_5m: pd.DataFrame, df_15m: pd.DataFrame, symbol: str = "VN30F1M"
@@ -174,6 +193,13 @@ class SignalRecommenderEngine:
             reasoning.append(f"Vùng giá hiện tại đang sát mức Fibonacci {nearest_fib} (Khung 15m).")
 
         # Calculate Risk/Reward
+        trailing_atr = None
+        trailing_offset = None
+        exit_strategy = ""
+        if recommendation in ["BUY", "SELL"]:
+            trailing_atr, trailing_offset = self._build_trailing_stop_plan(df_1m, curr_price)
+            exit_strategy = "atr_trailing_stop_10m"
+
         rr_ratio = 0.0
         if recommendation in ["BUY", "SELL"] and stop_loss and targets:
             avg_entry = sum([entry_min, entry_max]) / 2
@@ -189,6 +215,12 @@ class SignalRecommenderEngine:
                 confidence -= 20
 
         # Construct structured model
+        if recommendation in ["BUY", "SELL"] and trailing_offset is not None:
+            exit_note = f"Exit plan: trail stop by ATR {self.trailing_stop_atr_multiplier:.1f}x on 10m, offset ~{trailing_offset:,.1f}."
+            if targets:
+                exit_note += f" First profit map stays near {targets[0]:,.1f}."
+            reasoning.append(exit_note)
+
         trend_short = "BULLISH" if mtf_bias == "BULLISH" else ("BEARISH" if mtf_bias == "BEARISH" else "NEUTRAL")
         momentum = "STRONG" if adx_1m >= 25 else ("MODERATE" if adx_1m >= 15 else "WEAK")
 
@@ -205,6 +237,12 @@ class SignalRecommenderEngine:
             entry_zone=EntryZone(min_price=round(entry_min,1), max_price=round(entry_max,1)) if recommendation in ["BUY", "SELL"] else None,
             stop_loss=round(stop_loss, 1) if stop_loss else None,
             take_profit_targets=[round(t, 1) for t in targets],
+            exit_strategy=exit_strategy,
+            trailing_stop_timeframe="10m" if recommendation in ["BUY", "SELL"] else "",
+            trailing_stop_atr_period=self.trailing_stop_atr_period,
+            trailing_stop_atr_multiplier=self.trailing_stop_atr_multiplier if recommendation in ["BUY", "SELL"] else 0.0,
+            trailing_stop_atr=trailing_atr,
+            trailing_stop_offset=trailing_offset,
             supports=[round(s, 1) for s in supports],
             resistances=[round(r, 1) for r in resistances],
             nearest_fib_zone=nearest_fib,
@@ -212,6 +250,10 @@ class SignalRecommenderEngine:
             momentum=momentum,
             risk_reward_estimate=round(rr_ratio, 2),
             reasoning=reasoning,
+            risk_note=(
+                f"Protect with trailing ATR stop on 10m x{self.trailing_stop_atr_multiplier:.1f}; do not widen the stop once price moves in favor."
+                if recommendation in ["BUY", "SELL"] else ""
+            ),
             data_status="live",
             generated_at=datetime.now()
         )

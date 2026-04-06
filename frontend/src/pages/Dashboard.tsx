@@ -1,15 +1,136 @@
-// frontend/src/pages/Dashboard.tsx
-import { useState, useEffect, useRef } from 'react'
-import { Activity, AlertCircle, Briefcase, Zap, Target, WifiOff, RefreshCw, Clock, TrendingUp, TrendingDown, Lock } from 'lucide-react'
-import { useWebSocket } from '../hooks/useWebSocket'
-import { useMarketStore, type ConnectionStatus as FeedConnectionStatus } from '../hooks/useMarketStore'
-import KillSwitch from '../components/KillSwitch'
-import AgentLog from '../components/AgentLog'
-import RecommendationCard from '../components/RecommendationCard'
-import MarketInsightCard from '../components/MarketInsightCard'
+import { useEffect, useMemo, useRef, useState, type ElementType } from 'react'
+import {
+  AlertCircle,
+  BarChart3,
+  Briefcase,
+  Clock,
+  Database,
+  Lock,
+  RefreshCw,
+  Target,
+  TrendingDown,
+  TrendingUp,
+  Wallet,
+  WifiOff,
+  Zap,
+} from 'lucide-react'
 
-// ── Price Flash Component ─────────────────────────────────────────────────────
-function PriceDisplay({ price, prevPrice, isClosed }: { price: number, prevPrice: number, isClosed: boolean }) {
+import KillSwitch from '../components/KillSwitch'
+import MarketInsightCard from '../components/MarketInsightCard'
+import PositionCard from '../components/PositionCard'
+import RecommendationCard from '../components/RecommendationCard'
+import { useMarketStore, type ConnectionStatus as FeedConnectionStatus } from '../hooks/useMarketStore'
+import { useWebSocket } from '../hooks/useWebSocket'
+
+const API_BASE = 'http://localhost:8000'
+
+interface PortfolioItem {
+  id: number
+  symbol: string
+  direction: 'BUY' | 'SELL'
+  status: 'OPEN' | 'CLOSED'
+  entry_price: number
+  current_price: number
+  exit_price?: number | null
+  take_profit: number | null
+  stop_loss: number | null
+  opened_at: string
+  closed_at: string | null
+  close_reason: string | null
+  realized_pnl: number
+  unrealized_pnl: number
+}
+
+interface PortfolioResponse {
+  balance: number
+  closed_count: number
+  equity: number
+  history: PortfolioItem[]
+  open_count: number
+  open_positions: PortfolioItem[]
+  realized_pnl: number
+  starting_capital: number
+  symbol: string
+  unrealized_pnl: number
+  win_rate: number
+  window_days: number
+}
+
+interface HistoryEvent {
+  id: number
+  order_id: number
+  symbol: string
+  event_type: 'OPEN' | 'ADJUST' | 'CLOSE' | 'MARK_TO_MARKET'
+  event_time: string
+  status: 'OPEN' | 'CLOSED'
+  price: number | null
+  pnl: number
+  details: Record<string, unknown>
+}
+
+interface OrderHistoryResponse {
+  window_days: number
+  orders: PortfolioItem[]
+  events: HistoryEvent[]
+}
+
+interface CoverageItem {
+  symbol: string
+  timeframe: '1m' | '5m' | '15m' | '1D'
+  rows: number
+  first_timestamp: string | null
+  last_timestamp: string | null
+}
+
+interface CoverageResponse {
+  symbol: string
+  history_window_days: number
+  last_sync: {
+    synced_at?: string
+    error?: string
+    fetched_rows?: number
+    daily_fetched_rows?: number
+  }
+  items: CoverageItem[]
+}
+
+interface RecommendationReplayRun {
+  id: number
+  symbol: string
+  provider: string
+  start_date: string
+  end_date: string
+  include_ai: boolean
+  status: string
+  total_signals: number
+  created_at: string
+  completed_at: string | null
+}
+
+interface RecommendationHistoryItem {
+  id: number
+  run_id: number
+  recommendation: string
+  generated_at: string
+  current_price: number
+  ai_applied: boolean
+  app_recommendation: {
+    confidence: number
+    reasoning?: string[]
+  }
+  ai_recommendation: {
+    reasoning?: string[]
+    risk_note?: string
+    ai_source?: string
+  } | null
+}
+
+interface RecommendationHistoryResponse {
+  items: RecommendationHistoryItem[]
+  runs: RecommendationReplayRun[]
+}
+
+function PriceDisplay({ price, prevPrice, isClosed }: { price: number; prevPrice: number; isClosed: boolean }) {
   const [flash, setFlash] = useState<'up' | 'down' | null>(null)
   const prevRef = useRef(prevPrice)
 
@@ -18,18 +139,14 @@ function PriceDisplay({ price, prevPrice, isClosed }: { price: number, prevPrice
       prevRef.current = price
       return
     }
-    if (price > prevRef.current) {
-      setFlash('up')
-    } else if (price < prevRef.current) {
-      setFlash('down')
-    }
+    if (price > prevRef.current) setFlash('up')
+    if (price < prevRef.current) setFlash('down')
     prevRef.current = price
     const timer = setTimeout(() => setFlash(null), 600)
     return () => clearTimeout(timer)
-  }, [price])
+  }, [isClosed, price])
 
   const flashClass = flash === 'up' ? 'price-flash-up' : flash === 'down' ? 'price-flash-down' : ''
-
   return (
     <span className={`text-2xl font-mono tracking-tight text-white transition-colors duration-300 ${flashClass}`}>
       {price > 0 ? price.toLocaleString('en-US', { minimumFractionDigits: 1 }) : '---'}
@@ -37,378 +154,492 @@ function PriceDisplay({ price, prevPrice, isClosed }: { price: number, prevPrice
   )
 }
 
-function FeedStatusBadge({ status, source, isStale, marketSession }: { status: FeedConnectionStatus, source: string, isStale: boolean, marketSession: string }) {
+function FeedStatusBadge({
+  status,
+  source,
+  isStale,
+  marketSession,
+}: {
+  status: FeedConnectionStatus
+  source: string
+  isStale: boolean
+  marketSession: string
+}) {
   if (marketSession === 'CLOSED') {
     return (
       <div className="flex items-center gap-1.5 opacity-80">
         <Lock size={12} className="text-slate-500" />
-        <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">Market Closed</span>
+        <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Market Closed</span>
       </div>
     )
   }
-
   if (isStale) {
     return (
       <div className="flex items-center gap-1.5">
         <Clock size={12} className="text-amber-400" />
-        <span className="text-amber-400 text-xs font-bold uppercase tracking-wider">Stale</span>
+        <span className="text-xs font-bold uppercase tracking-wider text-amber-400">Stale</span>
       </div>
     )
   }
-
   if (source === 'dnse_websocket') {
     return (
       <div className="flex items-center gap-1.5">
         <span className="live-dot" />
-        <span className="text-teal-400 text-xs font-bold uppercase tracking-wider">Live</span>
-        <span className="text-[9px] text-slate-500 ml-1">WS</span>
+        <span className="text-xs font-bold uppercase tracking-wider text-teal-400">Live WS</span>
       </div>
     )
   }
-
   if (source === 'dnse_rest') {
     return (
       <div className="flex items-center gap-1.5">
-        <span className="inline-block w-2 h-2 rounded-full bg-blue-400" style={{ animation: 'livePulse 2s ease-in-out infinite' }} />
-        <span className="text-blue-400 text-xs font-bold uppercase tracking-wider">Live</span>
-        <span className="text-[9px] text-slate-500 ml-1">REST</span>
+        <span className="inline-block h-2 w-2 rounded-full bg-blue-400" style={{ animation: 'livePulse 2s ease-in-out infinite' }} />
+        <span className="text-xs font-bold uppercase tracking-wider text-blue-400">REST Poll</span>
       </div>
     )
   }
-
-  if (source === 'mock') {
-    return (
-      <div className="flex items-center gap-1.5">
-        <span className="inline-block w-2 h-2 rounded-full bg-amber-400" style={{ animation: 'livePulse 2s ease-in-out infinite' }} />
-        <span className="text-amber-400 text-xs font-bold uppercase tracking-wider">Live</span>
-        <span className="text-[9px] text-slate-500 ml-1">MOCK</span>
-      </div>
-    )
-  }
-
   if (status === 'reconnecting' || status === 'connecting') {
     return (
       <div className="flex items-center gap-1.5">
-        <RefreshCw size={12} className="text-amber-400 animate-spin" />
-        <span className="text-amber-400 text-xs font-bold uppercase tracking-wider">Reconnecting</span>
+        <RefreshCw size={12} className="animate-spin text-amber-400" />
+        <span className="text-xs font-bold uppercase tracking-wider text-amber-400">Reconnecting</span>
       </div>
     )
   }
-
   return (
     <div className="flex items-center gap-1.5">
       <WifiOff size={12} className="text-red-400" />
-      <span className="text-red-400 text-xs font-bold uppercase tracking-wider">Offline</span>
+      <span className="text-xs font-bold uppercase tracking-wider text-red-400">Offline</span>
     </div>
   )
 }
 
-// ── Main Dashboard ────────────────────────────────────────────────────────────
+function SummaryCard({
+  label,
+  value,
+  subtext,
+  icon: Icon,
+  tone = 'text-slate-100',
+}: {
+  label: string
+  value: string
+  subtext: string
+  icon: ElementType
+  tone?: string
+}) {
+  return (
+    <div className="glass-card p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{label}</span>
+        <Icon size={14} className="text-slate-500" />
+      </div>
+      <p className={`text-2xl font-bold tracking-tight ${tone}`}>{value}</p>
+      <p className="mt-1 text-xs text-slate-500">{subtext}</p>
+    </div>
+  )
+}
+
+function formatClock(value?: string | null) {
+  if (!value) return '--:--:--'
+  try {
+    return new Date(value).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  } catch {
+    return '--:--:--'
+  }
+}
+
+function formatStamp(value?: string | null) {
+  if (!value) return '--'
+  try {
+    return new Date(value).toLocaleString('vi-VN')
+  } catch {
+    return '--'
+  }
+}
+
+function formatMoney(value: number) {
+  return value.toLocaleString('vi-VN', { maximumFractionDigits: 0 })
+}
+
+function eventTone(eventType: HistoryEvent['event_type']) {
+  if (eventType === 'OPEN') return 'text-teal-400'
+  if (eventType === 'CLOSE') return 'text-red-400'
+  if (eventType === 'ADJUST') return 'text-amber-400'
+  return 'text-slate-400'
+}
+
 export default function Dashboard() {
-  const { isConnected, latestStatus, latestTick, latestInsight, latestRecommendation, messages } = useWebSocket('ws://localhost:8000/ws')
-  
-  // Zustand market store — realtime data from WebSocket
-  const tick = useMarketStore((s) => s.ticks['VN30F1M'])
-  const connectionStatus = useMarketStore((s) => s.connectionStatus)
-  const feedSource = useMarketStore((s) => s.feedSource)
-  const isStale = useMarketStore((s) => s.isStale)
-  const marketSession = useMarketStore((s) => s.marketSession)
-  const lastTickAt = useMarketStore((s) => s.lastTickAt)
-  
-  const [positions, setPositions] = useState<any[]>([])
-  const [logs, setLogs] = useState<any[]>([])
+  const { latestTick, latestInsight, latestRecommendation } = useWebSocket('ws://localhost:8000/ws')
+
+  const tick = useMarketStore((state) => state.ticks['VN30F1M'])
+  const connectionStatus = useMarketStore((state) => state.connectionStatus)
+  const feedSource = useMarketStore((state) => state.feedSource)
+  const isStale = useMarketStore((state) => state.isStale)
+  const marketSession = useMarketStore((state) => state.marketSession)
+  const lastTickAt = useMarketStore((state) => state.lastTickAt)
+
+  const [portfolio, setPortfolio] = useState<PortfolioResponse | null>(null)
+  const [history, setHistory] = useState<OrderHistoryResponse | null>(null)
+  const [coverage, setCoverage] = useState<CoverageResponse | null>(null)
+  const [recommendationHistory, setRecommendationHistory] = useState<RecommendationHistoryResponse | null>(null)
 
   useEffect(() => {
-    const latestMsg = messages[0]
-    if (!latestMsg) return
-
-    if (latestMsg.type === 'DECISION') {
-      const decision = latestMsg.data
-      setLogs(prev => [{
-        id: Date.now().toString(),
-        time: new Date().toLocaleTimeString(),
-        action: decision.action || 'EXECUTE',
-        score: decision.confidence || 0,
-        symbol: decision.symbol || 'VN30F1M',
-        note: decision.rationale || 'AI executed decision'
-      }, ...prev].slice(0, 10))
-    } else if (latestMsg.type === 'POSITION') {
-      setPositions(prev => {
-        const exist = prev.find(p => p.order_id === latestMsg.data.order_id)
-        if (exist) return prev.map(p => p.order_id === latestMsg.data.order_id ? latestMsg.data : p)
-        return [latestMsg.data, ...prev]
-      })
-    } else if (latestMsg.type === 'POSITION_CLOSED') {
-      const closedId = latestMsg.data.order_id
-      setPositions(prev => prev.filter(p => p.order_id !== closedId))
+    let active = true
+    const loadDashboard = async () => {
+      try {
+        const [portfolioRes, historyRes, coverageRes, recommendationHistoryRes] = await Promise.all([
+          fetch(`${API_BASE}/v1/market/portfolio?limit=12&days=30`),
+          fetch(`${API_BASE}/v1/market/order-history?limit=40&days=30`),
+          fetch(`${API_BASE}/v1/market/data-coverage`),
+          fetch(`${API_BASE}/v1/market/recommendation-history?limit=30`),
+        ])
+        if (!portfolioRes.ok || !historyRes.ok || !coverageRes.ok || !recommendationHistoryRes.ok) return
+        const portfolioData: PortfolioResponse = await portfolioRes.json()
+        const historyData: OrderHistoryResponse = await historyRes.json()
+        const coverageData: CoverageResponse = await coverageRes.json()
+        const recommendationHistoryData: RecommendationHistoryResponse = await recommendationHistoryRes.json()
+        if (!active) return
+        setPortfolio(portfolioData)
+        setHistory(historyData)
+        setCoverage(coverageData)
+        setRecommendationHistory(recommendationHistoryData)
+      } catch (error) {
+        console.error('Failed to load dashboard:', error)
+      }
     }
-  }, [messages])
 
-  // Derived data from Zustand store
-  const price = tick?.price ?? 0
+    loadDashboard()
+    const timer = setInterval(loadDashboard, 30000)
+    return () => {
+      active = false
+      clearInterval(timer)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!latestRecommendation) return
+    void (async () => {
+      try {
+        const [portfolioRes, historyRes, coverageRes, recommendationHistoryRes] = await Promise.all([
+          fetch(`${API_BASE}/v1/market/portfolio?limit=12&days=30`),
+          fetch(`${API_BASE}/v1/market/order-history?limit=40&days=30`),
+          fetch(`${API_BASE}/v1/market/data-coverage`),
+          fetch(`${API_BASE}/v1/market/recommendation-history?limit=30`),
+        ])
+        if (!portfolioRes.ok || !historyRes.ok || !coverageRes.ok || !recommendationHistoryRes.ok) return
+        setPortfolio(await portfolioRes.json())
+        setHistory(await historyRes.json())
+        setCoverage(await coverageRes.json())
+        setRecommendationHistory(await recommendationHistoryRes.json())
+      } catch (error) {
+        console.error('Failed to refresh dashboard state:', error)
+      }
+    })()
+  }, [latestRecommendation])
+
+  const price = tick?.price ?? latestTick?.price ?? 0
   const prevPrice = tick?.prevPrice ?? price
-  const changePct = tick?.changePct ?? 0
-  const high = tick?.high ?? 0
-  const low = tick?.low ?? 0
-  const volume = tick?.sessionVolume ?? tick?.volume ?? 0
-
-  const baseBalance = 50000.00
-  const openPnL = positions.reduce((acc, p) => {
-    const currentPrice = price || latestTick?.price || p.filled_price
-    const diff = p.direction === 'BUY' ? currentPrice - p.filled_price : p.filled_price - currentPrice
-    return acc + (diff * 1000)
-  }, 0)
-  
-  const equity = baseBalance + openPnL
-  const marginUsed = positions.length * 250
-  const freeMargin = equity - marginUsed
-  const marginLevel = marginUsed > 0 ? (equity / marginUsed) * 100 : 0
-
-  const formatLastUpdate = (ts?: string | null) => {
-    if (!ts) return '--:--:--'
-    try {
-      return new Date(ts).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    } catch { return '--:--:--' }
-  }
-
-  const pnlColorClass = openPnL > 0 ? 'text-teal-400' : openPnL < 0 ? 'text-red-400' : 'text-slate-300'
+  const changePct = tick?.changePct ?? latestTick?.changePct ?? 0
+  const positions = portfolio?.open_positions ?? []
+  const orderEvents = useMemo(() => (history?.events ?? []).filter((event) => event.event_type !== 'MARK_TO_MARKET').slice(0, 20), [history])
+  const coverageItems = useMemo(() => coverage?.items ?? [], [coverage])
+  const replayRun = recommendationHistory?.runs?.[0] ?? null
+  const replaySignals = useMemo(
+    () => (recommendationHistory?.items ?? []).filter((item) => ['BUY', 'SELL'].includes(item.recommendation)).slice(0, 5),
+    [recommendationHistory],
+  )
 
   return (
     <div className="space-y-6 animate-fade-in pb-12">
-      
-      {/* 1. TOP SUMMARY / MARKET BAR */}
-      <div className="glass-card flex flex-col lg:flex-row lg:items-center justify-between p-4 gap-4 border-l-4 border-l-teal-500">
-        
-        {/* System & Market Status */}
+      <div className="glass-card flex flex-col gap-4 border-l-4 border-l-teal-500 p-4 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex flex-wrap items-center gap-6">
-          {/* Feed Status */}
           <FeedStatusBadge status={connectionStatus} source={feedSource} isStale={isStale} marketSession={marketSession} />
-          
-          <div className="h-4 w-px bg-white/10 hidden lg:block"></div>
-          
-          {/* Core Symbol Quote */}
+          <div className="hidden h-4 w-px bg-white/10 lg:block" />
           <div className="flex items-baseline gap-3">
-            <span className="text-xl font-bold text-slate-100">VN30F1M</span>
+            <span className="text-xl font-bold text-slate-100">{portfolio?.symbol || 'VN30F1M'}</span>
             <PriceDisplay price={price} prevPrice={prevPrice} isClosed={marketSession === 'CLOSED'} />
             {changePct !== 0 && (
-              <span className={`text-sm font-bold font-mono flex items-center gap-0.5 ${changePct >= 0 ? 'text-teal-400' : 'text-red-400'}`}>
+              <span className={`flex items-center gap-0.5 text-sm font-bold font-mono ${changePct >= 0 ? 'text-teal-400' : 'text-red-400'}`}>
                 {changePct >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
-                {changePct > 0 ? '+' : ''}{changePct.toFixed(2)}%
+                {changePct > 0 ? '+' : ''}
+                {changePct.toFixed(2)}%
               </span>
             )}
           </div>
-
-          <div className="h-4 w-px bg-white/10 hidden lg:block"></div>
-
-          {/* Session High / Low / Volume */}
-          <div className="flex items-center gap-4 text-xs text-slate-400">
-            {high > 0 && (
-              <>
-                <div>
-                  <span className="text-[10px] text-slate-500 uppercase tracking-widest mr-1">H</span>
-                  <span className="text-slate-200 font-mono">{high.toLocaleString('en-US', { minimumFractionDigits: 1 })}</span>
-                </div>
-                <div>
-                  <span className="text-[10px] text-slate-500 uppercase tracking-widest mr-1">L</span>
-                  <span className="text-slate-200 font-mono">{low.toLocaleString('en-US', { minimumFractionDigits: 1 })}</span>
-                </div>
-              </>
-            )}
-            {volume > 0 && (
-              <div>
-                <span className="text-[10px] text-slate-500 uppercase tracking-widest mr-1">Vol</span>
-                <span className="text-slate-200 font-mono">{(volume / 1000).toFixed(1)}K</span>
-              </div>
-            )}
-          </div>
         </div>
 
-        {/* Info & Mode */}
         <div className="flex items-center gap-4 text-xs font-medium">
-          <div className="text-slate-400 flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 text-slate-400">
             <Clock size={12} />
-            <span className="text-slate-200">{formatLastUpdate(lastTickAt)}</span>
+            <span className="text-slate-200">{formatClock(lastTickAt)}</span>
           </div>
-          <div className={`px-3 py-1 rounded border ${latestStatus?.is_live_trading_enabled ? 'bg-amber-500/10 border-amber-500/30 text-amber-500' : 'bg-slate-800/50 border-slate-700 text-slate-400'}`}>
-            {latestStatus?.is_live_trading_enabled ? 'LIVE TRADING' : 'PAPER TRADING'}
-          </div>
+          <div className="rounded border border-teal-500/20 bg-teal-500/10 px-3 py-1 text-teal-300">SIGNAL ONLY</div>
         </div>
       </div>
 
-      {/* Stale / Disconnected / Closed Warning Banner */}
       {marketSession === 'CLOSED' ? (
-        <div className="flex items-start gap-2 text-xs text-slate-400 bg-slate-800/50 border border-slate-700/50 p-3 rounded-lg animate-fade-in">
+        <div className="flex items-start gap-2 rounded-lg border border-slate-700/50 bg-slate-800/50 p-3 text-xs text-slate-400">
           <Lock size={14} className="mt-0.5 shrink-0" />
-          <p>The market is currently closed. Auto-trading and AI evaluation evaluate based on the last closing price.</p>
+          <p>The market is closed. Signals use the latest confirmed session data and resume automatically next session.</p>
         </div>
-      ) : (isStale || connectionStatus === 'disconnected') && price > 0 && (
-        <div className="flex items-start gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 p-3 rounded-lg animate-fade-in">
+      ) : (isStale || connectionStatus === 'disconnected') && price > 0 ? (
+        <div className="flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-400">
           <AlertCircle size={14} className="mt-0.5 shrink-0" />
-          <p>
-            {connectionStatus === 'disconnected'
-              ? 'Market data feed is disconnected. Dashboard shows last known prices. Reconnecting...'
-              : 'Market data may be stale. AI execution is paused until fresh data is restored.'}
-          </p>
+          <p>{connectionStatus === 'disconnected' ? 'Market feed is disconnected. Dashboard shows the last known price.' : 'Feed looks stale. Signal journaling uses the latest confirmed price until freshness returns.'}</p>
         </div>
-      )}
+      ) : null}
 
-      <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
-        
-        {/* 2. SIDE INFO / ACCOUNT / AI (Left Panel - 4 Cols) */}
-        <div className="md:col-span-4 xl:col-span-3 space-y-6">
-          
-          {/* Performance Overview Card */}
-          <div className="glass-card p-5 relative overflow-hidden">
-            <div className="absolute top-0 right-0 p-4 opacity-5">
-              <Activity size={80} />
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+            <SummaryCard
+              label="Starting Capital"
+              value={portfolio ? formatMoney(portfolio.starting_capital) : '---'}
+              subtext="Signal journal base"
+              icon={Wallet}
+            />
+            <SummaryCard
+              label="Equity"
+              value={portfolio ? formatMoney(portfolio.equity) : '---'}
+              subtext={`${portfolio?.open_count ?? 0} open positions`}
+              icon={BarChart3}
+            />
+            <SummaryCard
+              label="Realized PnL"
+              value={portfolio ? formatMoney(portfolio.realized_pnl) : '---'}
+              subtext={`${portfolio?.closed_count ?? 0} closed trades`}
+              icon={Briefcase}
+              tone={(portfolio?.realized_pnl ?? 0) >= 0 ? 'text-teal-400' : 'text-red-400'}
+            />
+            <SummaryCard
+              label="Win Rate"
+              value={portfolio ? `${portfolio.win_rate.toFixed(1)}%` : '---'}
+              subtext={`${portfolio?.window_days ?? 30}-day view`}
+              icon={Target}
+            />
+          </div>
+
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <div>
+              <h2 className="mb-2 ml-1 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-teal-400">
+                <Zap size={12} className="text-amber-400" /> Market Insight
+              </h2>
+              <MarketInsightCard insight={latestInsight} />
             </div>
-            <h2 className="text-[10px] uppercase tracking-widest text-slate-500 font-bold mb-3 flex items-center gap-1.5">
-              <Briefcase size={12} /> Live P&L
-            </h2>
-            <div className={`text-4xl font-black tracking-tighter mb-4 ${pnlColorClass}`}>
-              {openPnL > 0 ? '+' : ''}{openPnL.toLocaleString('en-US', {minimumFractionDigits: 2})} <span className="text-lg opacity-50">đ</span>
-            </div>
-            
-            <div className="grid grid-cols-2 gap-4 border-t border-white/5 pt-4">
+
+            <div className="space-y-4">
               <div>
-                <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Balance</p>
-                <p className="text-sm font-bold text-slate-200">{baseBalance.toLocaleString()}</p>
+                <h2 className="mb-2 ml-1 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-slate-500">
+                  <Target size={12} /> Latest Recommendation
+                </h2>
+                <RecommendationCard signal={latestRecommendation} />
               </div>
-              <div>
-                <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Equity</p>
-                <p className={`text-sm font-bold ${equity > baseBalance ? 'text-teal-400' : 'text-slate-200'}`}>{equity.toLocaleString()}</p>
-              </div>
-              <div>
-                <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Free Margin</p>
-                <p className="text-sm font-bold text-slate-200">{freeMargin.toLocaleString()}</p>
-              </div>
-              <div>
-                <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Margin Lvl</p>
-                <p className="text-sm font-bold text-teal-400">{marginLevel > 0 ? marginLevel.toFixed(1) + '%' : '---'}</p>
+              <div className="glass-card border border-amber-500/10 bg-amber-500/5 p-4">
+                <KillSwitch />
               </div>
             </div>
           </div>
 
-          {/* AI Market Insight — Rich Card */}
-          <div>
-            <h2 className="text-[10px] uppercase tracking-widest text-teal-400 font-bold mb-2 flex items-center gap-1.5">
-              <Zap size={12} className="text-amber-400" /> Market Insight
-            </h2>
-            <MarketInsightCard insight={latestInsight} />
-          </div>
+          <div className="glass-card p-4">
+            <div className="mb-4 flex items-start justify-between gap-4">
+              <div>
+                <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+                  <Database size={15} className="text-blue-400" />
+                  Data Coverage
+                </h2>
+                <p className="text-xs text-slate-500">Local vnstock cache used for recommendation fallback and 30-day replay.</p>
+              </div>
+              <div className="text-right text-xs text-slate-500">
+                <div>{coverage?.history_window_days ?? 30}-day target</div>
+                <div>{coverage?.last_sync?.synced_at ? `Last sync ${formatStamp(coverage.last_sync.synced_at)}` : 'Awaiting background sync'}</div>
+              </div>
+            </div>
 
-          {/* AI Recommendation Focus */}
-          <div className="flex flex-col h-full gap-2">
-            <h2 className="text-[10px] uppercase tracking-widest text-slate-500 font-bold ml-1 flex items-center gap-1.5">
-              <Target size={12} /> Structural Signal
-            </h2>
-            <RecommendationCard signal={latestRecommendation} />
-          </div>
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              {coverageItems.map((item) => (
+                <div key={item.timeframe} className="rounded-lg border border-white/5 bg-slate-900/40 p-3">
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{item.timeframe}</span>
+                    <span className="text-[10px] text-slate-400">{item.symbol}</span>
+                  </div>
+                  <div className="text-xl font-bold text-slate-100">{formatMoney(item.rows)}</div>
+                  <div className="mt-1 text-[11px] text-slate-500">bars in local cache</div>
+                  <div className="mt-3 space-y-1 text-[11px] text-slate-400">
+                    <div>From: {formatStamp(item.first_timestamp)}</div>
+                    <div>To: {formatStamp(item.last_timestamp)}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
 
-          {/* Safety & Risk */}
-          <div className="glass-card p-4 border border-red-500/20 bg-red-500/5">
-            <KillSwitch />
-            {isStale && (
-              <div className="mt-4 flex items-start gap-2 text-xs text-amber-500 bg-amber-500/10 p-2 rounded">
-                <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                <p>Market data connection is delayed. AI execution is suspended until sync is restored.</p>
+            {coverage?.last_sync?.error ? (
+              <div className="mt-4 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                Last history sync error: {coverage.last_sync.error}
+              </div>
+            ) : (
+              <div className="mt-4 flex flex-wrap gap-4 text-xs text-slate-500">
+                <span>Latest 1m sync: {coverage?.last_sync?.fetched_rows ?? 0} rows</span>
+                <span>Latest 1D sync: {coverage?.last_sync?.daily_fetched_rows ?? 0} rows</span>
               </div>
             )}
           </div>
 
-        </div>
-
-        {/* 3. MAIN TRADING PANEL (Right Panel) */}
-        <div className="md:col-span-8 xl:col-span-9 space-y-6 flex flex-col">
-          
-          {/* Active Positions */}
-          <div className="glass-card flex-1 flex flex-col p-1">
-            {/* Minimal Tab Header */}
-            <div className="flex items-center gap-4 px-4 py-3 border-b border-white/5">
-              <button className="text-xs font-bold text-teal-400 border-b-2 border-teal-400 pb-1 flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 bg-teal-400 rounded-full animate-pulse"></span>
-                ACTIVE POSITIONS ({positions.length})
-              </button>
-              <button className="text-xs font-bold text-slate-500 hover:text-slate-300 pb-1 transition-colors">
-                PENDING (0)
-              </button>
-              <button className="text-xs font-bold text-slate-500 hover:text-slate-300 pb-1 transition-colors">
-                HISTORY
-              </button>
+          <div className="glass-card p-4">
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-100">Open Recommendation Orders</h2>
+                <p className="text-xs text-slate-500">Active simulated orders generated from recommendation signals.</p>
+              </div>
+              <span className="rounded border border-white/10 bg-slate-900/60 px-3 py-1 text-xs text-slate-300">{positions.length} active</span>
             </div>
 
-            {/* Position Grid */}
-            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 content-start min-h-[300px]">
-              {positions.length > 0 ? positions.map((pos) => {
-                const current = price || latestTick?.price || pos.filled_price
-                const isBuy = pos.direction === 'BUY'
-                const pnl = isBuy ? current - pos.filled_price : pos.filled_price - current
-                const isWin = pnl >= 0
+            {positions.length > 0 ? (
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                {positions.map((position) => (
+                  <PositionCard
+                    key={position.id}
+                    position={{
+                      id: String(position.id),
+                      symbol: position.symbol,
+                      direction: position.direction === 'BUY' ? 'LONG' : 'SHORT',
+                      entry: position.entry_price,
+                      current: position.current_price,
+                      pnl: position.entry_price > 0 ? (position.unrealized_pnl / position.entry_price) * 100 : 0,
+                      sl: position.stop_loss ?? position.entry_price,
+                      tp: position.take_profit ?? position.current_price,
+                    }}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="flex min-h-[180px] flex-col items-center justify-center opacity-40">
+                <Briefcase size={32} className="mb-2 text-slate-500" />
+                <p className="text-sm font-medium text-slate-400">No open recommendation orders</p>
+              </div>
+            )}
+          </div>
+        </div>
 
-                return (
-                  <div key={pos.order_id} className="relative bg-slate-800/30 rounded border border-white/5 p-4 hover:border-white/10 transition-colors group">
-                    <div className={`absolute left-0 top-0 bottom-0 w-1 rounded-l ${isBuy ? 'bg-teal-500' : 'bg-red-500'}`}></div>
-                    
-                    <div className="flex justify-between items-start mb-3">
-                      <div>
-                        <div className="flex items-center gap-2 mb-0.5">
-                          <span className="font-bold text-slate-100">{pos.symbol}</span>
-                          <span className={`text-[9px] px-1.5 py-0.5 rounded uppercase font-bold tracking-wider ${isBuy ? 'bg-teal-500/20 text-teal-400' : 'bg-red-500/20 text-red-400'}`}>
-                            {pos.direction}
-                          </span>
-                        </div>
-                        <div className="text-[10px] text-slate-500">
-                          Vol: {pos.lots || 1} • Entry: <span className="text-slate-300">{pos.filled_price}</span>
-                        </div>
-                      </div>
-                      <div className={`text-lg font-black tracking-tight ${isWin ? 'text-teal-400' : 'text-red-400'}`}>
-                        {isWin ? '+' : ''}{(pnl * 1000).toLocaleString('en-US', {minimumFractionDigits: 1})}
-                      </div>
+        <div className="space-y-6">
+          <div className="glass-card overflow-hidden">
+            <div className="flex items-start justify-between border-b border-white/5 px-4 py-3">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-100">Historical Recommendation Replay</h2>
+                <p className="text-xs text-slate-500">Recommendation history generated from old candles, with app output and AI commentary.</p>
+              </div>
+              <div className="text-right text-xs text-slate-500">
+                <div>{replayRun ? `Run #${replayRun.id}` : 'No run yet'}</div>
+                <div className={replayRun?.status === 'completed' ? 'text-teal-400' : replayRun?.status === 'running' ? 'text-amber-400' : 'text-slate-500'}>
+                  {replayRun?.status || '--'}
+                </div>
+              </div>
+            </div>
+
+            {replaySignals.length > 0 ? (
+              <div className="divide-y divide-white/5">
+                {replaySignals.map((item) => (
+                  <div key={item.id} className="px-4 py-3">
+                    <div className="mb-1 flex items-center gap-2">
+                      <span className={item.recommendation === 'BUY' ? 'text-teal-400' : 'text-red-400'}>{item.recommendation}</span>
+                      <span className="text-xs text-slate-200">{formatStamp(item.generated_at)}</span>
+                      <span className="ml-auto text-xs text-slate-400">{formatMoney(item.current_price)}</span>
                     </div>
-
-                    <div className="flex justify-between items-center text-[10px] font-bold text-slate-500 mb-4 bg-black/20 p-2 rounded">
-                      <div className="flex flex-col">
-                        <span className="uppercase text-[8px] tracking-widest opacity-50">Stop Loss</span>
-                        <span className={pos.sl ? 'text-red-400' : ''}>{pos.sl || 'NONE'}</span>
-                      </div>
-                      <div className="flex flex-col text-right">
-                        <span className="uppercase text-[8px] tracking-widest opacity-50">Take Profit</span>
-                        <span className={pos.tp ? 'text-teal-400' : ''}>{pos.tp || 'NONE'}</span>
-                      </div>
+                    <div className="text-xs text-slate-400">
+                      {item.app_recommendation.reasoning?.[0] || 'No app reasoning'}
                     </div>
-
-                    <div className="grid grid-cols-3 gap-2">
-                      <button className="col-span-1 py-1.5 rounded border border-white/10 text-[10px] font-bold text-slate-300 hover:bg-white/5 transition-colors">
-                        SET SL/BE
-                      </button>
-                      <button className="col-span-1 py-1.5 rounded border border-white/10 text-[10px] font-bold text-slate-300 hover:bg-white/5 transition-colors">
-                        TAKE 50%
-                      </button>
-                      <button className="col-span-1 py-1.5 rounded bg-red-500/10 border border-red-500/20 text-[10px] font-bold text-red-400 hover:bg-red-500/20 transition-colors flex items-center justify-center gap-1">
-                        <Zap size={10} /> CLOSE
-                      </button>
+                    <div className="mt-1 text-xs text-amber-200/80">
+                      {item.ai_recommendation?.reasoning?.[0] || item.ai_recommendation?.risk_note || 'AI note pending or not applied'}
                     </div>
                   </div>
-                )
-              }) : (
-                <div className="col-span-full h-full min-h-[200px] flex flex-col items-center justify-center opacity-40">
-                  <Briefcase size={32} className="mb-2 text-slate-500" />
-                  <p className="text-sm font-medium text-slate-400">No active positions</p>
+                ))}
+              </div>
+            ) : (
+              <div className="px-4 py-8 text-sm text-slate-500">
+                Dashboard replay history only shows BUY/SELL by default. Run a 30-day replay or wait for the current run to finish to surface actionable entries here.
+              </div>
+            )}
+          </div>
+
+          <div className="glass-card overflow-hidden">
+            <div className="border-b border-white/5 px-4 py-3">
+              <h2 className="text-sm font-semibold text-slate-100">Recommendation Order Timeline</h2>
+              <p className="text-xs text-slate-500">Open, adjust, and close events over the last 30 days.</p>
+            </div>
+            <div className="max-h-[420px] overflow-auto">
+              {orderEvents.length > 0 ? (
+                <div className="divide-y divide-white/5">
+                  {orderEvents.map((event) => (
+                    <div key={event.id} className="px-4 py-3">
+                      <div className="mb-1 flex items-center gap-2">
+                        <span className={`text-xs font-bold uppercase tracking-wider ${eventTone(event.event_type)}`}>{event.event_type}</span>
+                        <span className="text-xs font-semibold text-slate-200">{event.symbol}</span>
+                        <span className="ml-auto text-[10px] text-slate-500">{formatStamp(event.event_time)}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-xs text-slate-400">
+                        <span>Order #{event.order_id}</span>
+                        <span>{event.price ? event.price.toLocaleString('vi-VN', { maximumFractionDigits: 1 }) : '---'}</span>
+                      </div>
+                      <div className="mt-1 flex items-center justify-between text-xs">
+                        <span className="text-slate-500">{String(event.details.close_reason || event.details.direction || 'signal update')}</span>
+                        <span className={event.pnl >= 0 ? 'text-teal-400' : 'text-red-400'}>
+                          {event.pnl === 0 ? '0' : formatMoney(event.pnl)}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
                 </div>
+              ) : (
+                <div className="px-6 py-12 text-center text-sm text-slate-500">No order events recorded in the last 30 days.</div>
               )}
             </div>
           </div>
 
+          <div className="glass-card overflow-hidden">
+            <div className="flex items-center justify-between border-b border-white/5 px-4 py-3">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-100">Closed Order Results</h2>
+                <p className="text-xs text-slate-500">Most recent recommendation trades and their outcomes.</p>
+              </div>
+              <span className="text-xs text-slate-500">{history?.orders.length ?? 0} rows</span>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-white/5">
+                    <th className="px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-slate-500">Symbol</th>
+                    <th className="px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-slate-500">Lifecycle</th>
+                    <th className="px-4 py-3 text-right text-[11px] font-medium uppercase tracking-wider text-slate-500">Open</th>
+                    <th className="px-4 py-3 text-right text-[11px] font-medium uppercase tracking-wider text-slate-500">Close</th>
+                    <th className="px-4 py-3 text-right text-[11px] font-medium uppercase tracking-wider text-slate-500">Result</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(history?.orders ?? []).map((item) => (
+                    <tr key={item.id} className="border-b border-white/5">
+                      <td className="px-4 py-3 font-semibold text-slate-200">{item.symbol}</td>
+                      <td className="px-4 py-3 text-xs text-slate-400">
+                        <div className={item.direction === 'BUY' ? 'text-teal-400' : 'text-red-400'}>{item.direction}</div>
+                        <div>{item.close_reason || item.status}</div>
+                      </td>
+                      <td className="px-4 py-3 text-right text-xs text-slate-300">
+                        <div className="font-mono">{item.entry_price.toLocaleString('vi-VN', { maximumFractionDigits: 1 })}</div>
+                        <div className="text-slate-500">{formatStamp(item.opened_at)}</div>
+                      </td>
+                      <td className="px-4 py-3 text-right text-xs text-slate-300">
+                        <div className="font-mono">{item.exit_price?.toLocaleString('vi-VN', { maximumFractionDigits: 1 }) ?? '---'}</div>
+                        <div className="text-slate-500">{formatStamp(item.closed_at)}</div>
+                      </td>
+                      <td className={`px-4 py-3 text-right font-mono ${item.status === 'OPEN' ? 'text-amber-400' : item.realized_pnl >= 0 ? 'text-teal-400' : 'text-red-400'}`}>
+                        {item.status === 'OPEN' ? formatMoney(item.unrealized_pnl) : formatMoney(item.realized_pnl)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
-
       </div>
-
-      {/* 4. LOWER SUPPORTING PANEL */}
-      <div className="grid grid-cols-1">
-        <h2 className="text-[10px] uppercase tracking-widest text-slate-500 font-bold ml-1 mb-2">Detailed Execution Logs</h2>
-        <AgentLog entries={logs} />
-      </div>
-
     </div>
   )
 }

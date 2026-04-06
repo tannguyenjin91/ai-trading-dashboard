@@ -1,6 +1,6 @@
 // frontend/src/components/SafetyDeck.tsx
 import { useState } from 'react'
-import { Shield, ShieldAlert, Activity, Globe, AlertCircle } from 'lucide-react'
+import { Shield, ShieldAlert, AlertCircle } from 'lucide-react'
 
 interface SafetyDeckProps {
   status: any | null

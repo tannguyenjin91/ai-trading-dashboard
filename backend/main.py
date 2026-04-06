@@ -1,59 +1,50 @@
-# backend/main.py
-# FastAPI application entry point for vn-ai-trader.
-# Modularized Architecture: Strategy Signal Layer + Broker Execution Layer.
-
 import asyncio
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
+from typing import Any
 
+import pandas as pd
 import redis.asyncio as aioredis
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
+from agent.prompt import RECOMMENDATION_SYSTEM_PROMPT, build_recommendation_prompt
+from api.market_api import router as market_router
+from api.monitor import router as monitor_router
 from config.logging import setup_logging
 from config.settings import settings
-from data.realtime_feed import RealtimeMarketFeed
-from data.cache import get_recent_ticks, aggregate_to_ohlcv
-from data.store import DiskDataStore
-
-# New Architecture Imports
-from strategy_signal.ai_reasoner import AIReasoningService
-from strategy_signal.signal_service import SignalService
-from strategy_signal.recommender import SignalRecommenderEngine
-from agent.prompt import RECOMMENDATION_SYSTEM_PROMPT, build_recommendation_prompt
-from execution.tcbs_connector import TcbsBrokerAdapter
-from execution.risk_engine import RiskEngine
-from execution.execution_service import ExecutionService
-from monitoring.audit_log import AuditLogger
-from monitoring.telegram_bot import TelegramNotifier
-from monitoring.system_monitor import SystemMonitor
-from api.monitor import router as monitor_router
-
-# Hybrid Data & Execution Imports
-from data.market_cache import LiveMarketCache
-from strategy_signal.refinement_service import LiveSignalRefinementService
-from execution.reconciliation_service import OrderReconciliationService
-from data.vnstock_service import VnstockDataIngestionService
 from data.feature_store import FeatureStoreService
-from data.dnse_service import DnseDataIngestionService
-from strategy_signal.research_engine import ResearchEngineService
+from data.market_cache import LiveMarketCache
+from data.realtime_feed import RealtimeMarketFeed
+from data.store import DiskDataStore
+from data.vnstock_service import VnstockDataIngestionService
+from indicators.engine import build_features
+from monitoring.audit_log import AuditLogger
+from monitoring.system_monitor import SystemMonitor
+from monitoring.telegram_bot import TelegramNotifier
+from strategy_signal.ai_reasoner import AIReasoningService
+from strategy_signal.backtest_service import BacktestService
+from strategy_signal.recommender import SignalRecommenderEngine
+from strategy_signal.signal_journal import SignalJournalService
+from strategy_signal.recommendation_history import RecommendationHistoryService
+from strategy_signal.strategy_settings import StrategySettingsService
+
 
 class ConnectionManager:
-    """Manages active WebSocket connections for broadcasting market updates."""
     def __init__(self):
         self.active_connections: list[WebSocket] = []
 
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
         self.active_connections.append(websocket)
-        logger.info(f"WebSocket client connected — total: {len(self.active_connections)}")
+        logger.info(f"WebSocket client connected - total: {len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket) -> None:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
-        logger.info(f"WebSocket client disconnected — total: {len(self.active_connections)}")
+        logger.info(f"WebSocket client disconnected - total: {len(self.active_connections)}")
 
     async def broadcast(self, data: dict) -> None:
         dead = []
@@ -65,326 +56,275 @@ class ConnectionManager:
         for ws in dead:
             self.disconnect(ws)
 
+
 manager = ConnectionManager()
 
-async def run_analysis_loop(app: FastAPI):
-    """
-    Periodically fetches ticks from cache, generates signals, and executes trades.
-    Orchestrated via SignalService and ExecutionService.
-    """
-    while True:
-        await asyncio.sleep(10)
-        
-        # Check Kill Switch status
-        if hasattr(app.state, "monitor") and app.state.monitor.is_kill_switch_active:
-            logger.warning("🚫 Analysis loop paused: Kill Switch is ACTIVE")
-            continue
-            
-        try:
-            symbol = "VN30F1M" 
-            ticks = await get_recent_ticks(app.state.redis, symbol, limit=5000)
-            if not ticks:
-                continue
-            
-            # 1. Aggregate into candles
-            df = aggregate_to_ohlcv(ticks, timeframe="2s") 
-            if len(df) < 20:
-                logger.debug(f"⏳ Accumulating data... ({len(df)}/20 candles)")
-                continue
 
-            # 2. Persist candle (Persistence Layer)
-            if hasattr(app.state, "store"):
-                await app.state.store.save_candle(
-                    symbol=symbol,
-                    timestamp=df.index[-1],
-                    ohlcv=df.iloc[-1].to_dict(),
-                    timeframe="2s"
-                )
+def record_recommendation(app: FastAPI, recommendation: dict[str, Any]) -> None:
+    if not hasattr(app.state, "recommendation_feed"):
+        app.state.recommendation_feed = deque(maxlen=50)
+    app.state.latest_recommendation = recommendation
+    app.state.recommendation_feed.appendleft(recommendation)
 
-            # 3. Strategy Signal Block
-            # SignalService coordinates: Features -> Signals -> AI Reasoning -> TradeIntent
-            active_pos_count = len(await app.state.broker_adapter.get_positions())
-            intent = await app.state.signal_service.generate_trade_intent(
-                symbol=symbol,
-                df=df,
-                active_positions_count=active_pos_count
-            )
-            
-            if intent:
-                # Log Cycle & Intent
-                if hasattr(app.state, "audit"):
-                    await app.state.audit.log_cycle({"symbol": symbol, "time": datetime.now().isoformat()})
-                    await app.state.audit.log_decision(intent.model_dump())
 
-                # Broadcast Intent to Frontend
-                await manager.broadcast({"type": "SIGNAL", "data": intent.model_dump()})
-                
-                # Wire Telegram Notification
-                if hasattr(app.state, "notifier") and app.state.notifier:
-                    asyncio.create_task(app.state.notifier.send_trade_signal(intent))
-                
-                # 4. Broker Execution Block
-                # ExecutionService coordinates: Intent -> Risk Gate -> Broker Adapter -> Notifications
-                # Pass the timestamp of the last candle for staleness check
-                last_candle_time = df.index[-1]
-                if hasattr(last_candle_time, 'to_pydatetime'):
-                    last_candle_time = last_candle_time.to_pydatetime()
-                
-                receipt = await app.state.execution_service.execute_intent(
-                    intent=intent, 
-                    last_candle_time=last_candle_time
-                )
-                
-                if receipt:
-                    # Broadcast Execution Update
-                    await manager.broadcast({"type": "EXECUTION", "data": receipt.model_dump()})
+def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    return (
+        df.resample(timeframe)
+        .agg(
+            {
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+            }
+        )
+        .dropna()
+    )
 
-            # 5. Broadcast System Status Update
-            if hasattr(app.state, "monitor"):
-                await manager.broadcast({
-                    "type": "SYSTEM_STATUS", 
-                    "data": app.state.monitor.get_status_summary()
-                })
-            
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Analysis loop critical error: {e}")
+
+async def persist_recent_bars(app: FastAPI, symbol: str, df: pd.DataFrame, timeframe: str) -> None:
+    for timestamp, row in df.tail(120).iterrows():
+        await app.state.store.save_candle(
+            symbol=symbol,
+            timestamp=timestamp.to_pydatetime() if hasattr(timestamp, "to_pydatetime") else timestamp,
+            ohlcv={
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": int(float(row.get("volume", 0) or 0)),
+            },
+            timeframe=timeframe,
+        )
+
+
+async def sync_symbol_history(app: FastAPI, symbol: str, provider: str, history_days: int) -> dict[str, Any]:
+    coverage_before = await app.state.store.get_coverage(symbol, "1m")
+    fetched = await app.state.vnstock_service.backfill_recent_data(
+        symbol=symbol,
+        days=history_days,
+        timeframe="1m",
+        source=provider,
+    )
+    daily_fetched = await app.state.vnstock_service.backfill_recent_data(
+        symbol=symbol,
+        days=max(history_days, 90),
+        timeframe="1D",
+        source=provider,
+    )
+    df_1m = await app.state.store.get_candles_range(
+        symbol=symbol,
+        timeframe="1m",
+        start=(datetime.now() - pd.Timedelta(days=max(history_days, 1))).strftime("%Y-%m-%d %H:%M:%S"),
+        end=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    if not df_1m.empty:
+        await persist_recent_bars(app, symbol, resample_ohlcv(df_1m, "5min"), "5m")
+        await persist_recent_bars(app, symbol, resample_ohlcv(df_1m, "15min"), "15m")
+    coverage_after = await app.state.store.get_coverage(symbol, "1m")
+    return {
+        "symbol": symbol,
+        "provider": provider,
+        "history_days": history_days,
+        "fetched_rows": fetched,
+        "daily_fetched_rows": daily_fetched,
+        "coverage_before": coverage_before,
+        "coverage_after": coverage_after,
+    }
+
 
 async def run_ai_insight_loop(app: FastAPI):
-    """Periodically queries LLM for general market framework to display on dashboard.
-    Uses DNSE historical bars (15m, 100 bars) for high-quality indicator computation.
-    Falls back to tick aggregation if DNSE is unavailable.
-    """
-    await asyncio.sleep(15) # Wait 15s on startup to let data feed populate
+    await asyncio.sleep(10)
     while True:
+        sleep_for = 300
         try:
-            if not hasattr(app.state, "ai_service") or not app.state.ai_service:
-                await asyncio.sleep(900)
+            if getattr(app.state.monitor, "is_kill_switch_active", False):
+                await asyncio.sleep(30)
                 continue
-            
-            symbol = "VN30F1M"
-            df = None
-            data_source = "none"
-            
-            # PRIMARY: Fetch directly from DNSE API (100 bars, 15m) for quality indicators
-            if hasattr(app.state, "dnse_service") and app.state.dnse_service:
-                try:
-                    bars = await app.state.dnse_service.fetch_history(symbol, timeframe="15m", limit=200)
-                    if bars and len(bars) >= 30:
-                        import pandas as pd
-                        df_data = [{
-                            "timestamp": b.timestamp,
-                            "open": b.open, "high": b.high,
-                            "low": b.low, "close": b.close,
-                            "volume": b.volume
-                        } for b in bars]
-                        df = pd.DataFrame(df_data)
-                        df.set_index("timestamp", inplace=True)
-                        data_source = f"DNSE(15m, {len(bars)} bars)"
-                        logger.info(f"AI Insight using {data_source}")
-                    else:
-                        logger.warning(f"DNSE returned only {len(bars) if bars else 0} bars, need >=30")
-                except Exception as e:
-                    logger.warning(f"DNSE fetch failed for AI insight: {e}")
-            
-            # FALLBACK: Use tick aggregation if DNSE unavailable
-            if df is None:
-                ticks = await get_recent_ticks(app.state.redis, symbol, limit=5000)
-                if ticks:
-                    df = aggregate_to_ohlcv(ticks, timeframe="1min")
-                    data_source = f"TickCache(1min, {len(df)} bars)"
-                    logger.info(f"AI Insight fallback to {data_source}")
-            
-            if df is None or len(df) < 20:
-                logger.debug(f"AI Insight: insufficient data ({len(df) if df is not None else 0} bars)")
+            current_settings = await app.state.strategy_settings.get_settings()
+            symbol = current_settings.symbol
+            app.state.feed.symbols = [symbol]
+            sleep_for = max(current_settings.analysis_interval_sec, 300)
+
+            df = await app.state.vnstock_service.fetch_history_df(
+                symbol=symbol,
+                timeframe="15m",
+                limit=220,
+                source=current_settings.provider,
+            )
+            if df.empty or len(df) < 30:
+                logger.debug(f"AI insight skipped for {symbol}: insufficient vnstock bars")
                 await asyncio.sleep(60)
                 continue
-                
+
+            await persist_recent_bars(app, symbol, df, "15m")
             insight = await app.state.ai_service.generate_market_insight(df)
             if insight:
-                insight["_data_source"] = data_source  # For debugging
-                
-                await manager.broadcast({
-                    "type": "AI_INSIGHT",
-                    "data": insight
-                })
-                
-                # Send Telegram notification with rich summary
-                if hasattr(app.state, "notifier") and app.state.notifier:
-                    bias = insight.get("bias", "NEUTRAL")
-                    bias_emoji = "🟢" if bias == "BULLISH" else ("🔴" if bias == "BEARISH" else "⚪")
-                    one_liner = insight.get("one_liner", "")
-                    supports = insight.get("supports", [])
-                    resistances = insight.get("resistances", [])
-                    nearest_fib = insight.get("nearest_fib_zone", "N/A")
-                    scenario_bull = insight.get("scenario_bullish", "")
-                    scenario_bear = insight.get("scenario_bearish", "")
-                    risk_note = insight.get("risk_note", "")
-                    confidence = insight.get("confidence", 0)
-                    price = insight.get("current_price", 0)
-                    change_pct = insight.get("price_change_pct", 0)
-                    regime = insight.get("regime", "UNKNOWN")
-                    dq = insight.get("data_quality", "unknown")
-                    ai_src = insight.get("ai_source", "")
-                    bars_used = insight.get("bars_used", 0)
-                    missing = insight.get("missing_indicators", [])
-                    
-                    s_str = " / ".join(f"{s:,.0f}" for s in supports[:2]) if supports else "N/A"
-                    r_str = " / ".join(f"{r:,.0f}" for r in resistances[:2]) if resistances else "N/A"
-                    
-                    # Data quality badge
-                    dq_badge = "✅ Full" if dq == "full" else ("⚠️ Partial" if dq == "partial" else "❌ Price Action Only")
-                    missing_str = f"\n⚠️ Thiếu: {', '.join(missing)}" if missing else ""
-                    
-                    tg_message = (
-                        f"{bias_emoji} <b>AI Market Insight — VN30F1M</b>\n\n"
-                        f"<b>{one_liner}</b>\n\n"
-                        f"📊 Giá: <code>{price:,.1f}</code> ({change_pct:+.2f}%) | Regime: {regime}\n"
-                        f"🛡 Hỗ trợ: {s_str}\n"
-                        f"⚡ Kháng cự: {r_str}\n"
-                        f"🔢 Fib gần nhất: {nearest_fib}\n\n"
-                        f"📈 Bull: {scenario_bull}\n"
-                        f"📉 Bear: {scenario_bear}\n\n"
-                        f"⚠️ {risk_note}\n"
-                        f"<i>Confidence: {confidence}% | 🤖 {ai_src} | Bars: {bars_used} | Data: {dq_badge}</i>"
-                        f"{missing_str}"
-                    )
-                    asyncio.create_task(app.state.notifier.send_message(tg_message))
-
+                insight["_data_source"] = f"vnstock:{current_settings.provider}"
+                app.state.latest_insight = insight
+                await manager.broadcast({"type": "AI_INSIGHT", "data": insight})
+                await app.state.audit.log_event("AI_INSIGHT", symbol=symbol, details=insight)
         except asyncio.CancelledError:
             break
-        except Exception as e:
-            logger.error(f"AI insight loop error: {e}")
-            
-        await asyncio.sleep(900) # Run every 15m
+        except Exception as exc:
+            logger.error(f"AI insight loop error: {exc}")
+            sleep_for = 60
+        await asyncio.sleep(sleep_for)
+
 
 async def run_recommendation_loop(app: FastAPI):
-    """Periodically runs the deterministic rule-based signal recommendation engine."""
-    await asyncio.sleep(10) # Initial wait
+    await asyncio.sleep(12)
     while True:
+        sleep_for = 300
         try:
-            if not hasattr(app.state, "recommender_engine") or not app.state.recommender_engine:
-                await asyncio.sleep(60)
+            if getattr(app.state.monitor, "is_kill_switch_active", False):
+                await asyncio.sleep(30)
                 continue
-                
-            symbol = "VN30F1M"
-            ticks = await get_recent_ticks(app.state.redis, symbol, limit=5000)
-            if not ticks:
-                logger.debug("⏳ Skipping recommendation. No ticks found in cache.")
-                await asyncio.sleep(60)
-                continue
-                
-            df_1m = aggregate_to_ohlcv(ticks, timeframe="1min")
-            df_5m = aggregate_to_ohlcv(ticks, timeframe="5min")
-            df_15m = aggregate_to_ohlcv(ticks, timeframe="15min")
-            
-            if len(df_1m) < 50 or len(df_15m) < 10:
-                logger.debug(f"⏳ Skipping recommendation. Need 50/10, got {len(df_1m)}/{len(df_15m)} (Ticks: {len(ticks)})")
-                await asyncio.sleep(60)
-                continue
-            else:
-                logger.debug(f"✅ Data sufficient: 1m={len(df_1m)}, 5m={len(df_5m)}, 15m={len(df_15m)}")
-            
-            # 1. Generate Technical-First Signal
-            rec = app.state.recommender_engine.generate_recommendation(df_1m, df_5m, df_15m, symbol)
-            
-            if rec:
-                logger.success(f"MTF Engine generated {rec.recommendation} | Bias: {rec.bias} | Confidence: {rec.confidence}%")
-            else:
-                logger.warning("MTF Engine returned None")
-                
-            # Process recommendation unconditionally every 15 mins
-            if rec and app.state.ai_service:
-                # 2. Add AI Narrative Layer using 1m data for latest price context
-                from indicators.engine import build_features
-                features_df = build_features(df_1m)
-                latest_candle = features_df.iloc[-1].to_dict()
-                
-                try:
-                    user_prompt = build_recommendation_prompt(rec.model_dump(), latest_candle)
-                    ai_dict = await app.state.ai_service.llm.analyze_market(RECOMMENDATION_SYSTEM_PROMPT, user_prompt)
-                    
-                    if ai_dict:
-                        # Keep technical recommendations intact, only update explanations
-                        raw_reasoning = ai_dict.get("reasoning")
-                        if isinstance(raw_reasoning, list) and len(raw_reasoning) > 0:
-                            rec.reasoning = raw_reasoning
-                        elif isinstance(raw_reasoning, str):
-                            rec.reasoning = [raw_reasoning]
-                            
-                        rec.risk_note = ai_dict.get("risk_note", "")
-                except Exception as e:
-                    logger.error(f"Failed to get AI narrative for recommendation: {e}")
-            
-                # 3. Broadcast to Dashboard
-                await manager.broadcast({
-                    "type": "RECOMMENDATION",
-                    "data": rec.model_dump()
-                })
-                
-                # 4. Telegram Alert
-                if hasattr(app.state, "notifier") and app.state.notifier:
-                    # Format rich text
-                    emoji = "🟢" if rec.recommendation == "BUY" else ("🔴" if rec.recommendation == "SELL" else "⚪")
-                    entry_str = f"{rec.entry_zone.min_price:,.1f} - {rec.entry_zone.max_price:,.1f}" if rec.entry_zone else "N/A"
-                    targets_str = ", ".join([f"{t:,.1f}" for t in rec.take_profit_targets]) if rec.take_profit_targets else "N/A"
-                    stop_str = f"{rec.stop_loss:,.1f}" if rec.stop_loss else "N/A"
-                    reason_str = "\n".join(rec.reasoning) if rec.reasoning else "Nội bộ Engine quyết định."
-                    
-                    msg = (
-                        f"{emoji} <b>[TÍN HIỆU] {rec.recommendation} {rec.symbol}</b>\n\n"
-                        f"📊 <b>Giá hiện tại:</b> <code>{rec.current_price:,.1f}</code>\n"
-                        f"🎯 <b>Vùng Mua/Bán:</b> {entry_str}\n"
-                        f"🛡 <b>Stop Loss:</b> {stop_str}\n"
-                        f"🚀 <b>Take Profit:</b> {targets_str}\n"
-                        f"📈 <b>Confidence:</b> {rec.confidence}%\n\n"
-                        f"💬 <b>Phân tích:</b> {reason_str}\n\n"
-                        f"⚠️ <i>Rủi ro: {rec.risk_note}</i>\n"
-                    )
-                    asyncio.create_task(app.state.notifier.send_message(msg))
-                    
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Recommendation loop error: {e}")
-            
-        await asyncio.sleep(900) # Run every 15 minutes
+            current_settings = await app.state.strategy_settings.get_settings()
+            symbol = current_settings.symbol
+            app.state.feed.symbols = [symbol]
+            sleep_for = max(current_settings.analysis_interval_sec, 300)
 
-async def run_reconciliation_loop(app: FastAPI):
-    """Periodically triggers position reconciliation to fix stale or zombie orders."""
-    while True:
-        await asyncio.sleep(45) # Run every 45s
-        try:
-            if not hasattr(app.state, "reconciler") or not hasattr(app.state, "broker_adapter"):
-                continue
-                
-            portfolio = await app.state.broker_adapter.get_portfolio()
-            positions = await app.state.broker_adapter.get_positions()
-            
-            await app.state.reconciler.reconcile_positions(
-                broker_portfolio=portfolio,
-                active_positions=positions
+            df_1m = await app.state.vnstock_service.fetch_history_df(
+                symbol=symbol,
+                timeframe="1m",
+                limit=500,
+                source=current_settings.provider,
             )
+            if df_1m.empty or len(df_1m) < 200:
+                logger.debug(f"Recommendation skipped for {symbol}: insufficient 1m bars")
+                await asyncio.sleep(60)
+                continue
+
+            df_5m = resample_ohlcv(df_1m, "5min")
+            df_15m = resample_ohlcv(df_1m, "15min")
+            if len(df_5m) < 50 or len(df_15m) < 20:
+                logger.debug(f"Recommendation skipped for {symbol}: resampled bars not ready")
+                await asyncio.sleep(60)
+                continue
+
+            await persist_recent_bars(app, symbol, df_1m, "1m")
+            await persist_recent_bars(app, symbol, df_5m, "5m")
+            await persist_recent_bars(app, symbol, df_15m, "15m")
+
+            recommendation = app.state.recommender_engine.generate_recommendation(df_1m, df_5m, df_15m, symbol)
+            if recommendation is None:
+                await asyncio.sleep(sleep_for)
+                continue
+
+            open_positions_before = await app.state.signal_journal.get_open_positions(symbol)
+            await app.state.signal_journal.sync_market_price(
+                symbol,
+                recommendation.current_price,
+                recommendation.generated_at,
+            )
+            current_open_positions = await app.state.signal_journal.get_open_positions(symbol)
+            if current_open_positions:
+                current_directions = {str(position["direction"]) for position in current_open_positions}
+                if recommendation.recommendation in current_directions:
+                    portfolio_snapshot = await app.state.signal_journal.get_portfolio_summary(current_settings, limit=10)
+                    await manager.broadcast({"type": "PORTFOLIO_UPDATE", "data": portfolio_snapshot})
+                    await asyncio.sleep(sleep_for)
+                    continue
+
+                if recommendation.recommendation in {"BUY", "SELL"} and current_directions and recommendation.recommendation not in current_directions:
+                    await app.state.signal_journal.close_open_positions(
+                        symbol=symbol,
+                        exit_price=recommendation.current_price,
+                        event_time=recommendation.generated_at,
+                        close_reason="signal_flip",
+                    )
+                    portfolio_snapshot = await app.state.signal_journal.get_portfolio_summary(current_settings, limit=10)
+                    await manager.broadcast({"type": "PORTFOLIO_UPDATE", "data": portfolio_snapshot})
+                    await asyncio.sleep(sleep_for)
+                    continue
+
+            if open_positions_before and current_open_positions:
+                portfolio_snapshot = await app.state.signal_journal.get_portfolio_summary(current_settings, limit=10)
+                await manager.broadcast({"type": "PORTFOLIO_UPDATE", "data": portfolio_snapshot})
+                await asyncio.sleep(sleep_for)
+                continue
+
+            if current_settings.ai_enabled and app.state.ai_service:
+                try:
+                    features_df = build_features(df_1m)
+                    latest_candle = features_df.iloc[-1].to_dict()
+                    user_prompt = build_recommendation_prompt(recommendation.model_dump(), latest_candle)
+                    ai_dict = await app.state.ai_service.llm.analyze_market(RECOMMENDATION_SYSTEM_PROMPT, user_prompt)
+                    if ai_dict:
+                        raw_reasoning = ai_dict.get("reasoning")
+                        if isinstance(raw_reasoning, list) and raw_reasoning:
+                            recommendation.reasoning = raw_reasoning
+                        elif isinstance(raw_reasoning, str) and raw_reasoning:
+                            recommendation.reasoning = [raw_reasoning]
+                        recommendation.risk_note = ai_dict.get("risk_note", recommendation.risk_note)
+                except Exception as exc:
+                    logger.warning(f"AI narrative enrichment failed: {exc}")
+
+            payload = recommendation.model_dump(mode="json")
+            record_recommendation(app, payload)
+            await app.state.audit.log_event("SIGNAL_RECOMMENDATION", symbol=symbol, details=payload)
+
+            journal_position = await app.state.signal_journal.record_recommendation(recommendation, current_settings)
+            portfolio_snapshot = await app.state.signal_journal.get_portfolio_summary(current_settings, limit=10)
+
+            await manager.broadcast({"type": "RECOMMENDATION", "data": payload})
+            await manager.broadcast({"type": "PORTFOLIO_UPDATE", "data": portfolio_snapshot})
+            if journal_position:
+                await manager.broadcast({"type": "POSITION", "data": journal_position})
+
         except asyncio.CancelledError:
             break
-        except Exception as e:
-            logger.error(f"Reconciliation loop error: {e}")
+        except Exception as exc:
+            logger.error(f"Recommendation loop error: {exc}")
+            sleep_for = 60
+        await asyncio.sleep(sleep_for)
 
-# ── Startup / Shutdown lifespan ──────────────────────────────────────────────
+
+async def run_history_sync_loop(app: FastAPI):
+    await asyncio.sleep(5)
+    while True:
+        sleep_for = 1800
+        try:
+            current_settings = await app.state.strategy_settings.get_settings()
+            sleep_for = max(current_settings.history_sync_interval_sec, 300)
+            sync_result = await sync_symbol_history(
+                app=app,
+                symbol=current_settings.symbol,
+                provider=current_settings.provider,
+                history_days=current_settings.history_window_days,
+            )
+            app.state.history_sync_status = {
+                **sync_result,
+                "synced_at": datetime.now(timezone.utc).isoformat(),
+            }
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.error(f"History sync loop error: {exc}")
+            app.state.history_sync_status = {
+                "error": str(exc),
+                "synced_at": datetime.now(timezone.utc).isoformat(),
+            }
+            sleep_for = 300
+        await asyncio.sleep(sleep_for)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging(settings.log_level)
-    logger.info("Starting VN AI Trader backend...")
-    logger.info(f"Environment: {settings.environment.value} | Paper Mode: {settings.tcbs_paper_mode} | Live Trading: {settings.live_trading}")
+    logger.info("Starting VN AI Signal Lab backend...")
+    logger.info(f"Environment: {settings.environment.value} | Signal mode: only recommendations")
 
-    # 1. Infrastructure Setup
     try:
         app.state.redis = aioredis.from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
         await app.state.redis.ping()
-        logger.info(f"✅ Redis connected")
-    except Exception as e:
-        logger.warning(f"⚠️ Redis unavailable: {e}")
+        logger.info("Redis connected")
+    except Exception as exc:
+        logger.warning(f"Redis unavailable: {exc}")
         app.state.redis = None
 
     app.state.store = DiskDataStore(db_path="market_data.db")
@@ -392,129 +332,78 @@ async def lifespan(app: FastAPI):
 
     app.state.audit = AuditLogger(settings.database_url)
     await app.state.audit.init_db()
-    
+
+    app.state.strategy_settings = StrategySettingsService(db_path="market_data.db")
+    await app.state.strategy_settings.init_db()
+    current_settings = await app.state.strategy_settings.get_settings()
+
+    app.state.signal_journal = SignalJournalService(db_path="market_data.db")
+    await app.state.signal_journal.init_db()
+    app.state.recommendation_history = RecommendationHistoryService(db_path="market_data.db")
+    await app.state.recommendation_history.init_db()
+
     app.state.notifier = TelegramNotifier(
         bot_token=settings.telegram_bot_token.get_secret_value() if settings.telegram_bot_token else "",
-        chat_id=settings.telegram_chat_id.get_secret_value() if settings.telegram_chat_id else ""
+        chat_id=settings.telegram_chat_id.get_secret_value() if settings.telegram_chat_id else "",
     )
-    
-    # 2. Monitoring & Safety
     app.state.monitor = SystemMonitor(settings)
-    app.state.telegram = app.state.notifier # Alias if needed, but updated to use app.state.notifier
-
-    # 2. Strategy Signal Layer Setup
-    app.state.ai_service = AIReasoningService()
-    app.state.signal_service = SignalService(ai_service=app.state.ai_service)
-    app.state.recommender_engine = SignalRecommenderEngine()
-
-    # 0. Hybrid Data Layer (Pipeline 2 Live Cache)
     app.state.market_cache = LiveMarketCache(stale_threshold_sec=2.0)
-    app.state.refinement_service = LiveSignalRefinementService(cache=app.state.market_cache)
-    app.state.reconciler = OrderReconciliationService(notifier=app.state.telegram)
 
-    # 0.1 Pipeline 1 (Research Data) - DNSE Preferred
-    app.state.vnstock_service = VnstockDataIngestionService(store=app.state.store)
-    app.state.dnse_service = DnseDataIngestionService(
-        store=app.state.store,
-        api_key=settings.dnse_api_key.get_secret_value()
-    )
+    app.state.ai_service = AIReasoningService()
+    app.state.recommender_engine = SignalRecommenderEngine()
+    app.state.backtest_service = BacktestService(app.state.recommender_engine)
+    app.state.vnstock_service = VnstockDataIngestionService(store=app.state.store, default_source=current_settings.provider)
     app.state.feature_store = FeatureStoreService(store=app.state.store)
-    app.state.research_engine = ResearchEngineService(
-        store=app.state.store, 
-        feature_store=app.state.feature_store
-    )
 
-    # 3. Broker Execution Layer Setup
-    app.state.broker_adapter = TcbsBrokerAdapter(
-        username=settings.tcbs_username,
-        password=settings.tcbs_password,
-        totp_secret=settings.tcbs_totp_secret.get_secret_value() if settings.tcbs_totp_secret else "",
-        paper_mode=settings.tcbs_paper_mode,
-        monitor=app.state.monitor
-    )
-    app.state.risk_engine = RiskEngine(settings=settings)
-    app.state.execution_service = ExecutionService(
-        broker=app.state.broker_adapter,
-        risk_engine=app.state.risk_engine,
-        refinement_service=app.state.refinement_service, # Injected
-        notifier=app.state.telegram,
-        audit_logger=app.state.audit
-    )
-    app.state.execution_service.monitor = app.state.monitor # Attach monitor
+    app.state.latest_recommendation = None
+    app.state.latest_insight = None
+    app.state.recommendation_feed = deque(maxlen=50)
+    app.state.history_sync_status = {}
+    app.state.recommendation_replay_jobs = {}
 
-    # 4. Data Feed & Background Tasks — DNSE WebSocket + REST polling fallback
     app.state.feed = RealtimeMarketFeed(
         app=app,
         websocket_manager=manager,
-        symbols=["VN30F1M"],
+        symbols=[current_settings.symbol],
         poll_interval_sec=settings.realtime_poll_interval,
     )
-    await app.state.feed.sync_with_market(app.state.dnse_service)
-    
-    # [NEW] Preload history into in-memory cache for MTF engine
-    try:
-        from data.cache import _memory_store
-        logger.info("Preloading MTF cache history from DNSE...")
-        hist_bars = await app.state.dnse_service.fetch_history(symbol="VN30F1M", timeframe="1m", limit=300)
-        if hist_bars:
-            ticks = []
-            for bar in hist_bars:
-                tick = {
-                    "symbol": "VN30F1M",
-                    "price": float(bar.close),
-                    "volume": int(bar.volume),
-                    "timestamp": bar.timestamp.isoformat(),
-                    "source_timestamp": bar.timestamp.isoformat(),
-                    "is_mock": False,
-                    "metadata": {}
-                }
-                ticks.append(tick)
-            _memory_store["ticks:VN30F1M"] = ticks
-            logger.success(f"Preloaded {len(ticks)} 1m bars into cache for MTF warmup.")
-    except Exception as e:
-        logger.warning(f"Failed to preload history: {e}")
-
+    await app.state.feed.sync_with_market()
     app.state.feed.start()
-    
-    # 5. Background Strategy Loops
-    app.state.analyzer_task = asyncio.create_task(run_analysis_loop(app))
+
+    app.state.history_task = asyncio.create_task(run_history_sync_loop(app))
     app.state.insight_task = asyncio.create_task(run_ai_insight_loop(app))
     app.state.recommender_task = asyncio.create_task(run_recommendation_loop(app))
-    app.state.reconciler_task = asyncio.create_task(run_reconciliation_loop(app))
-    
-    # TCBS Market Data Stream (Optional: depending on if we want live data now)
-    # app.state.broker_stream_task = asyncio.create_task(
-    #     app.state.broker_adapter.stream_market_data(["VN30F2406"], some_callback)
-    # )
 
-    await app.state.telegram.send_alert("VN AI Trader System Started", level="SYSTEM")
-    logger.info("VN AI Trader is ready")
+    try:
+        await app.state.notifier.send_alert("VN AI Signal Lab started", level="SYSTEM")
+    except Exception:
+        pass
+
+    logger.info("VN AI Signal Lab is ready")
     yield
 
-    # Shutdown
-    logger.info("Shutting down VN AI Trader...")
-    await app.state.telegram.send_alert("VN AI Trader System Shutting Down", level="SYSTEM")
+    logger.info("Shutting down VN AI Signal Lab...")
+    try:
+        await app.state.notifier.send_alert("VN AI Signal Lab shutting down", level="SYSTEM")
+    except Exception:
+        pass
+
     app.state.feed.stop()
-    if app.state.analyzer_task:
-        app.state.analyzer_task.cancel()
-    if getattr(app.state, "insight_task", None):
-        app.state.insight_task.cancel()
-    if getattr(app.state, "recommender_task", None):
-        app.state.recommender_task.cancel()
-    if getattr(app.state, "reconciler_task", None):
-        app.state.reconciler_task.cancel()
+    for task_name in ("history_task", "insight_task", "recommender_task"):
+        task = getattr(app.state, task_name, None)
+        if task:
+            task.cancel()
+    for task in getattr(app.state, "recommendation_replay_jobs", {}).values():
+        task.cancel()
+
     if app.state.redis:
         await app.state.redis.aclose()
 
 
-# ── FastAPI App ──────────────────────────────────────────────────────────────
-from api.monitor import router as monitor_router
-from api.market_api import router as market_router
-
 app = FastAPI(
-    title="VN AI Trader API",
-    description="Autonomous AI trading backend for Vietnamese stock markets",
-    version="0.2.0",
+    title="VN AI Signal Lab API",
+    description="Signal-only AI trading backend for Vietnamese markets",
+    version="0.3.0",
     docs_url="/docs",
     lifespan=lifespan,
 )
@@ -534,11 +423,12 @@ app.add_middleware(
 @app.get("/", tags=["Root"])
 async def root() -> dict:
     return {
-        "message": "Hello from VN AI Trader",
-        "version": "0.2.0",
-        "architecture": "Modularized Strategy+Execution",
+        "message": "Hello from VN AI Signal Lab",
+        "version": "0.3.0",
+        "mode": "signal_only",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
 
 @app.get("/health", tags=["Root"])
 async def health() -> dict:
@@ -546,9 +436,10 @@ async def health() -> dict:
     return {
         "status": "ok",
         "redis": redis_status,
-        "paper_mode": settings.tcbs_paper_mode,
+        "mode": "signal_only",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -557,8 +448,10 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.send_json({"type": "CONNECTION", "message": "Connected"})
         while True:
             await asyncio.sleep(5)
-            await websocket.send_json({"type": "HEARTBEAT", "timestamp": datetime.now(timezone.utc).isoformat()})
+            await websocket.send_json(
+                {"type": "HEARTBEAT", "timestamp": datetime.now(timezone.utc).isoformat()}
+            )
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-    except Exception as e:
+    except Exception:
         manager.disconnect(websocket)

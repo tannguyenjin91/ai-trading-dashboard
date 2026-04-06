@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     dnse_api_key: SecretStr = Field(default="", description="DNSE API key")
     dnse_username: str = Field(default="", description="DNSE login username for LightSpeed WebSocket")
     dnse_password: SecretStr = Field(default="", description="DNSE login password for LightSpeed WebSocket")
+    dnse_ws_enabled: bool = Field(default=True, description="Enable DNSE LightSpeed WebSocket stream")
     default_ai_model: AIModel = Field(default=AIModel.GEMINI, description="Default LLM provider")
 
     # ─── TCBS Broker ─────────────────────────────────────────────────────────

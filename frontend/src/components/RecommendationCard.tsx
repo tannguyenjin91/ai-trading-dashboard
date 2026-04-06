@@ -17,6 +17,11 @@ export interface SignalRecommendation {
   entry_zone: EntryZone | null;
   stop_loss: number | null;
   take_profit_targets: number[];
+  exit_strategy?: string;
+  trailing_stop_timeframe?: string;
+  trailing_stop_atr_multiplier?: number;
+  trailing_stop_atr?: number | null;
+  trailing_stop_offset?: number | null;
   supports: number[];
   resistances: number[];
   nearest_fib_zone: string;
@@ -45,7 +50,6 @@ const RecommendationCard: React.FC<{ signal: SignalRecommendation | null }> = ({
   const isSell = signal.recommendation === 'SELL';
   const isWait = signal.recommendation === 'WAIT' || signal.recommendation === 'HOLD';
   
-  const colorBase = isBuy ? 'teal' : isSell ? 'red' : 'slate';
   const headerBg = isBuy ? 'bg-teal-500/10' : isSell ? 'bg-red-500/10' : 'bg-slate-800/50';
   const textColor = isBuy ? 'text-teal-400' : isSell ? 'text-red-400' : 'text-slate-400';
   const borderColor = isBuy ? 'border-teal-500/20' : isSell ? 'border-red-500/20' : 'border-slate-700';
@@ -130,6 +134,17 @@ const RecommendationCard: React.FC<{ signal: SignalRecommendation | null }> = ({
               <p className="text-sm font-mono text-teal-400">{formatPrice(signal.take_profit_targets?.[0])}</p>
             </div>
           </div>
+
+          {!isWait && (signal.exit_strategy || signal.trailing_stop_offset) && (
+            <div className="rounded-lg border border-cyan-500/20 bg-cyan-950/10 p-3">
+              <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-cyan-300/80">Exit Plan</p>
+              <p className="text-xs text-cyan-100/80">
+                ATR trailing stop {signal.trailing_stop_timeframe || '10m'} x{(signal.trailing_stop_atr_multiplier ?? 2).toFixed(1)}
+                {signal.trailing_stop_offset ? `, offset ~${formatPrice(signal.trailing_stop_offset)}` : ''}
+                {signal.take_profit_targets?.[0] ? `, take profit map ${formatPrice(signal.take_profit_targets[0])}` : ''}
+              </p>
+            </div>
+          )}
 
           {!isWait && signal.risk_reward_estimate > 0 && (
              <div className="text-right mt-auto">

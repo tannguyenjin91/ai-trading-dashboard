@@ -91,52 +91,64 @@ def calculate_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float =
     """
     Calculates the Supertrend indicator line.
     Returns the Supertrend line and the Trend Direction (+1 for uptrend, -1 for downtrend).
+    The iterative seed starts from the first bar where ATR is available so a 73-bar window
+    still produces a usable last-value instead of reporting Supertrend as missing.
     """
     hl2 = (df["high"] + df["low"]) / 2
     atr = calculate_atr(df, period)
-    
+
     basic_upperband = hl2 + (multiplier * atr)
     basic_lowerband = hl2 - (multiplier * atr)
-    
+
     final_upperband = basic_upperband.copy()
     final_lowerband = basic_lowerband.copy()
-    
-    supertrend = pd.Series(index=df.index, dtype=float)
-    trend_direction = pd.Series(1, index=df.index, dtype=int)
-    
-    # Needs iterative pass for specific logic of Supertrend
-    # We will initialize loops
-    for i in range(1, len(df)):
-        # Calculate Final Upperband
-        if basic_upperband.iloc[i] < final_upperband.iloc[i-1] or df["close"].iloc[i-1] > final_upperband.iloc[i-1]:
+
+    supertrend = pd.Series(np.nan, index=df.index, dtype=float)
+    trend_direction = pd.Series(0, index=df.index, dtype=int)
+
+    first_valid_idx = atr.first_valid_index()
+    if first_valid_idx is None:
+        return supertrend, trend_direction
+
+    start = df.index.get_loc(first_valid_idx)
+    initial_direction = 1 if df["close"].iloc[start] >= hl2.iloc[start] else -1
+    trend_direction.iloc[start] = initial_direction
+    supertrend.iloc[start] = final_lowerband.iloc[start] if initial_direction == 1 else final_upperband.iloc[start]
+
+    for i in range(start + 1, len(df)):
+        prev_upper = final_upperband.iloc[i - 1]
+        prev_lower = final_lowerband.iloc[i - 1]
+        prev_close = df["close"].iloc[i - 1]
+
+        if pd.isna(prev_upper):
+            prev_upper = basic_upperband.iloc[i - 1]
+        if pd.isna(prev_lower):
+            prev_lower = basic_lowerband.iloc[i - 1]
+
+        if basic_upperband.iloc[i] < prev_upper or prev_close > prev_upper:
             final_upperband.iloc[i] = basic_upperband.iloc[i]
         else:
-            final_upperband.iloc[i] = final_upperband.iloc[i-1]
-            
-        # Calculate Final Lowerband
-        if basic_lowerband.iloc[i] > final_lowerband.iloc[i-1] or df["close"].iloc[i-1] < final_lowerband.iloc[i-1]:
+            final_upperband.iloc[i] = prev_upper
+
+        if basic_lowerband.iloc[i] > prev_lower or prev_close < prev_lower:
             final_lowerband.iloc[i] = basic_lowerband.iloc[i]
         else:
-            final_lowerband.iloc[i] = final_lowerband.iloc[i-1]
-            
-        # Determine Trend Direction
-        if supertrend.iloc[i-1] == final_upperband.iloc[i-1] and df["close"].iloc[i] < final_upperband.iloc[i]:
-            trend_direction.iloc[i] = -1
-        elif supertrend.iloc[i-1] == final_upperband.iloc[i-1] and df["close"].iloc[i] > final_upperband.iloc[i]:
-            trend_direction.iloc[i] = 1
-        elif supertrend.iloc[i-1] == final_lowerband.iloc[i-1] and df["close"].iloc[i] > final_lowerband.iloc[i]:
-            trend_direction.iloc[i] = 1
-        elif supertrend.iloc[i-1] == final_lowerband.iloc[i-1] and df["close"].iloc[i] < final_lowerband.iloc[i]:
-            trend_direction.iloc[i] = -1
+            final_lowerband.iloc[i] = prev_lower
+
+        prev_supertrend = supertrend.iloc[i - 1]
+        prev_direction = int(trend_direction.iloc[i - 1] or initial_direction)
+        if pd.isna(prev_supertrend):
+            prev_supertrend = final_lowerband.iloc[i - 1] if prev_direction == 1 else final_upperband.iloc[i - 1]
+
+        if prev_supertrend == final_upperband.iloc[i - 1]:
+            trend_direction.iloc[i] = -1 if df["close"].iloc[i] < final_upperband.iloc[i] else 1
+        elif prev_supertrend == final_lowerband.iloc[i - 1]:
+            trend_direction.iloc[i] = 1 if df["close"].iloc[i] > final_lowerband.iloc[i] else -1
         else:
-            trend_direction.iloc[i] = trend_direction.iloc[i-1]
-            
-        # Set Supertrend Line
-        if trend_direction.iloc[i] == 1:
-            supertrend.iloc[i] = final_lowerband.iloc[i]
-        else:
-            supertrend.iloc[i] = final_upperband.iloc[i]
-            
+            trend_direction.iloc[i] = prev_direction
+
+        supertrend.iloc[i] = final_lowerband.iloc[i] if trend_direction.iloc[i] == 1 else final_upperband.iloc[i]
+
     return supertrend, trend_direction
 
 
@@ -311,7 +323,7 @@ def validate_technical_data(df: pd.DataFrame) -> dict:
                 missing.append(group_name)
                 break
             val = last.get(col)
-            if val is None or (isinstance(val, float) and pd.isna(val)):
+            if val is None or pd.isna(val):
                 missing.append(group_name)
                 break
 

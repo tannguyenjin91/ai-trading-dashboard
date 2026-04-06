@@ -94,6 +94,12 @@ class SignalRecommendation(BaseModel):
     entry_zone: Optional[EntryZone] = None
     stop_loss: Optional[float] = None
     take_profit_targets: List[float] = Field(default_factory=list)
+    exit_strategy: str = ""
+    trailing_stop_timeframe: str = ""
+    trailing_stop_atr_period: int = 14
+    trailing_stop_atr_multiplier: float = 0.0
+    trailing_stop_atr: Optional[float] = None
+    trailing_stop_offset: Optional[float] = None
     
     # Context
     supports: List[float] = Field(default_factory=list)

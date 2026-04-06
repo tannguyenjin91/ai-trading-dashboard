@@ -1,84 +1,90 @@
-// frontend/src/components/KillSwitch.tsx
-// Emergency stop button — prompts for confirmation then calls /api/killswitch.
-// Colored red with glow. CRITICAL safety component.
-// Phase 1: UI only — API integration in Phase 5.
-
 import { useState } from 'react'
-import { AlertTriangle, X, Zap } from 'lucide-react'
+import { AlertTriangle, PauseCircle, PlayCircle } from 'lucide-react'
+
+const API_BASE = 'http://localhost:8000'
 
 export default function KillSwitch() {
   const [showConfirm, setShowConfirm] = useState(false)
-  const [triggered, setTriggered] = useState(false)
+  const [isPaused, setIsPaused] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
 
-  const handleKill = async () => {
+  const toggleSignals = async (active: boolean) => {
     try {
-      const response = await fetch('http://localhost:8000/v1/monitor/kill-switch', {
+      setIsSaving(true)
+      const response = await fetch(`${API_BASE}/v1/monitor/kill-switch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ active: true })
+        body: JSON.stringify({ active }),
       })
       if (response.ok) {
-        setTriggered(true)
+        setIsPaused(active)
         setShowConfirm(false)
-        console.log('🚨 KILLSWITCH triggered — system paused')
       }
-    } catch (err) {
-      console.error('Failed to trigger KillSwitch:', err)
+    } catch (error) {
+      console.error('Failed to toggle signal pause:', error)
+    } finally {
+      setIsSaving(false)
     }
-  }
-
-  if (triggered) {
-    return (
-      <div className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold text-red-100 animate-pulse"
-           style={{ background: 'rgba(239,68,68,0.8)', boxShadow: '0 0 15px rgba(239,68,68,0.5)' }}>
-        <AlertTriangle size={14} />
-        KILLSWITCH ACTIVE
-      </div>
-    )
   }
 
   return (
     <>
-      <button
-        id="killswitch-btn"
-        className="btn-kill flex items-center gap-2 text-sm"
-        onClick={() => setShowConfirm(true)}
-      >
-        <AlertTriangle size={14} />
-        KILL SWITCH
-      </button>
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <p className="text-sm font-semibold text-slate-100">Signal Pause</p>
+          <p className="text-xs text-slate-400">
+            {isPaused
+              ? 'AI recommendation loops are paused. Existing journal positions stay untouched.'
+              : 'Use this when you want to stop new recommendations and portfolio journaling.'}
+          </p>
+        </div>
 
-      {/* Confirmation modal */}
+        <button
+          type="button"
+          className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition-colors ${
+            isPaused
+              ? 'bg-teal-500/15 text-teal-300 border border-teal-500/20'
+              : 'bg-red-500/15 text-red-300 border border-red-500/20'
+          }`}
+          onClick={() => (isPaused ? toggleSignals(false) : setShowConfirm(true))}
+          disabled={isSaving}
+        >
+          {isPaused ? <PlayCircle size={14} /> : <PauseCircle size={14} />}
+          {isPaused ? 'Resume AI' : 'Pause AI'}
+        </button>
+      </div>
+
       {showConfirm && (
-        <div className="fixed inset-0 flex items-center justify-center z-50"
-             style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)' }}>
-          <div className="glass-card p-6 max-w-sm w-full mx-4 animate-slide-up"
-               style={{ borderColor: 'rgba(239,68,68,0.3)' }}>
-            <div className="flex items-center gap-3 mb-3">
-              <div className="p-2 rounded-lg bg-red-500/20">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center px-4"
+          style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)' }}
+        >
+          <div className="glass-card w-full max-w-sm p-6 animate-slide-up">
+            <div className="mb-3 flex items-center gap-3">
+              <div className="rounded-lg bg-red-500/15 p-2">
                 <AlertTriangle size={20} className="text-red-400" />
               </div>
-              <h2 className="text-base font-bold text-red-400">Xác nhận KILLSWITCH</h2>
+              <h2 className="text-base font-bold text-slate-100">Pause AI signals?</h2>
             </div>
-            <p className="text-sm text-slate-400 mb-5">
-              Hành động này sẽ <strong className="text-red-300">đóng TẤT CẢ vị thế ngay lập tức</strong> theo lệnh thị trường.
-              Không thể hoàn tác.
+            <p className="mb-5 text-sm text-slate-400">
+              This stops new recommendation cycles and prevents new journal entries. It does not delete history or close any simulated positions.
             </p>
             <div className="flex gap-3">
               <button
-                id="killswitch-confirm-btn"
-                className="btn-kill flex-1 flex items-center justify-center gap-2"
-                onClick={handleKill}
+                type="button"
+                className="btn-kill flex-1"
+                onClick={() => toggleSignals(true)}
+                disabled={isSaving}
               >
-                <Zap size={14} />
-                Xác nhận đóng tất cả
+                {isSaving ? 'Saving...' : 'Pause now'}
               </button>
               <button
-                className="flex-1 px-4 py-2 rounded-xl text-sm font-medium text-slate-400 transition-colors hover:text-slate-200"
+                type="button"
+                className="flex-1 rounded-xl px-4 py-2 text-sm font-medium text-slate-300"
                 style={{ background: 'rgba(100,116,139,0.1)', border: '1px solid rgba(100,116,139,0.2)' }}
                 onClick={() => setShowConfirm(false)}
               >
-                Hủy
+                Cancel
               </button>
             </div>
           </div>
